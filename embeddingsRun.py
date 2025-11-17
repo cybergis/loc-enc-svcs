@@ -395,7 +395,7 @@ for (
                     )
 
                 mlp_svc_interactions_raw = mlp_rslt.get_svc(
-                    col=original_feature_indices, coef_type="raw", include_primary=False
+                    col=original_feature_indices, coef_type="raw", include_primary=True
                 )
                 if (
                     mlp_svc_interactions_raw is not None
@@ -434,7 +434,7 @@ for (
                     # plot_s([est_intercept_mlp, ...], filename="mlp_svc_raw_clipped_rep.pdf", experiment_dir=REPETITION_DIR)
 
                 mlp_svc_interactions_smooth = mlp_rslt.get_svc(
-                    col=original_feature_indices, coef_type="gwr", include_primary=False
+                    col=original_feature_indices, coef_type="gwr", include_primary=True
                 )
                 if (
                     mlp_svc_interactions_smooth is not None
@@ -532,7 +532,7 @@ for (
                     )
 
                 xgb_svc_interactions_raw = xgb_rslt.get_svc(
-                    col=original_feature_indices, coef_type="raw", include_primary=False
+                    col=original_feature_indices, coef_type="raw", include_primary=True
                 )
                 if (
                     xgb_svc_interactions_raw is not None
@@ -569,7 +569,7 @@ for (
                         )
 
                 xgb_svc_interactions_smooth = xgb_rslt.get_svc(
-                    col=original_feature_indices, coef_type="gwr", include_primary=False
+                    col=original_feature_indices, coef_type="gwr", include_primary=True
                 )
                 if (
                     xgb_svc_interactions_smooth is not None
