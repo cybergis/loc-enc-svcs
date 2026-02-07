@@ -1,16 +1,20 @@
 """
 Grid-based location encoder experiments with GeoShapley.
-Concise version with formula-based DGP generation.
+
+Generates synthetic data on a regular grid with MGWR-style spatially-varying
+coefficients, trains an ML model augmented with location embeddings, and
+extracts spatial effects via GeoShapley for comparison against ground truth.
 """
 
 import argparse
+import traceback
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import torch
-from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from flaml import AutoML
 from geoshapley import GeoShapleyExplainer
 
@@ -18,8 +22,7 @@ from dgp_utils import create_grid_data
 from help_utils import calculate_spatial_metrics, get_loc_embeddings
 
 
-# Encoder configurations (all standardized to output_dim=12 for efficient GeoShapley computation)
-# Using TorchSpatial encoder type names compatible with get_loc_embeddings()
+# Encoder configurations (TorchSpatial encoder type names)
 ENCODER_CONFIGS = [
     {'name': 'Space2Vec-theory', 'encoder_type': 'Space2Vec-theory'},
     {'name': 'tile_ffn', 'encoder_type': 'tile_ffn'},
@@ -36,7 +39,7 @@ ENCODER_CONFIGS = [
 ]
 
 
-# Parse arguments at module level (like embeddingsRun.py)
+# NOTE: Parsing at module level (not under __main__) is required for joblib pickling
 parser = argparse.ArgumentParser(description='Grid location encoder experiments')
 parser.add_argument('--encoder_index', type=int, required=True)
 parser.add_argument('--model_type', type=str, default='MLP', choices=['MLP', 'XGBoost'])
@@ -60,7 +63,7 @@ output_dir.mkdir(exist_ok=True, parents=True)
 
 all_metrics = []
 
-# Main repetition loop at module level (NO if __name__ guard - needed for joblib pickling!)
+# NOTE: Main loop at module level (not under __main__) for joblib compatibility
 for repetition in range(args.num_repetitions):
         print(f"\n{'='*60}")
         print(f"GRID EXPERIMENT: {encoder_name} | {args.model_type} | Rep {repetition}")
@@ -88,18 +91,17 @@ for repetition in range(args.num_repetitions):
         
         if encoder_type is None:
             embeddings = np.zeros((len(data), 0))
-            print("  ✓ No encoder (baseline)")
+            print("  No encoder (baseline)")
         else:
             try:
-                # ALWAYS use CPU for embeddings (matching embeddingsRun.py - avoids CUDA/pickling issues)
                 embeddings_result = get_loc_embeddings(
-                    coords,  # Pass numpy array directly (not as keyword arg)
+                    coords,
                     encoder_type=encoder_type,
                     extent=extent,
-                    device="cpu"  # Force CPU to avoid CUDA tensor pickling issues in parallel workers
+                    device="cpu"  # CPU avoids CUDA tensor pickling issues
                 )
                 
-                # Handle both tensor and non-tensor returns (matching embeddingsRun.py logic)
+                # Handle tensor and array returns
                 if isinstance(embeddings_result, torch.Tensor):
                     embeddings = embeddings_result.detach().cpu().numpy()
                 else:
@@ -113,13 +115,12 @@ for repetition in range(args.num_repetitions):
                 
                 print(f"  ✓ Generated embeddings: shape {embeddings.shape}")
             except Exception as e:
-                print(f"  ✗ Error generating embeddings: {e}")
-                import traceback
+                print(f"  Error generating embeddings: {e}")
                 traceback.print_exc()
-                print("  Using baseline (no embeddings).")
+                print("  Falling back to baseline (no embeddings).")
                 embeddings = np.zeros((len(data), 0))
     
-        # Prepare features (mirror notebook setup: train on X1/X2 plus coords, then add embeddings)
+        # Prepare features
         print(f"\n[3/6] Preparing ML features...")
         X_base = pd.DataFrame({'X1': X1, 'X2': X2, 'lon': coords[:, 0], 'lat': coords[:, 1]})
         
@@ -129,19 +130,12 @@ for repetition in range(args.num_repetitions):
         else:
             X_ml_features = X_base.copy()
         
-        # Feature scaling: disabled to keep coefficients in original units
-        X_ml_features_scaled = X_ml_features.copy()
-        print(f"  ✓ Skipping scaling; using original feature scales")
-        
-        ml_feature_names = list(X_ml_features_scaled.columns)
-        
-        # GeoShapley expects the same feature matrix; we already included coords
-        X_for_geoshapley = X_ml_features_scaled.copy()
+        ml_feature_names = list(X_ml_features.columns)
+        X_for_geoshapley = X_ml_features.copy()
         geoshapley_feature_names = ml_feature_names
         
-        # Train/Test split (80/20) - matching embeddingsRun.py pattern
-        from sklearn.model_selection import train_test_split
-        print(f"\n[3.5/6] Splitting data (80% train, 20% test) with seed {rep_seed}...")
+        # Train/test split (80/20)
+        print(f"\n[3.5/6] Splitting data (80/20, seed={rep_seed})...")
         X_train_gs, X_test_gs, y_train, y_test = train_test_split(
             X_for_geoshapley, y, test_size=0.20, random_state=rep_seed
         )
@@ -149,7 +143,7 @@ for repetition in range(args.num_repetitions):
         X_test_ml = X_test_gs[ml_feature_names]
         print(f"  ✓ Train: {len(X_train_ml)} points, Test: {len(X_test_ml)} points")
         
-        # Train model AT MODULE LEVEL (not in a function - critical for XGBoost pickling)
+        # Train model
         print(f"\n[4/6] Training {args.model_type} model...")
         
         if args.model_type == 'MLP':
@@ -167,17 +161,17 @@ for repetition in range(args.num_repetitions):
                 param_dist, n_iter=20, cv=5,
                 random_state=rep_seed, n_jobs=-1
             )
-            search.fit(X_train_ml, y_train)  # Train on 80% train set
+            search.fit(X_train_ml, y_train)
             model = search.best_estimator_
             
         elif args.model_type == 'XGBoost':
             automl = AutoML()
-            automl.fit(X_train_ml, y_train,  # Train on 80% train set
+            automl.fit(X_train_ml, y_train,
                       time_budget=90, metric='r2',
                       estimator_list=['xgboost'], task='regression',
                       seed=rep_seed,
                       verbose=0)
-            model = automl.model.estimator  # Extract actual XGBoost model (FLAML wrapper doesn't pickle well)
+            model = automl.model.estimator
         
         else:
             raise ValueError(f"Unknown model_type: {args.model_type}")

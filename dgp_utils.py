@@ -16,14 +16,6 @@ class GridDGP:
     def __init__(self, size: int = 25, coord_system: str = 'regional', 
                  center_coords: Tuple[float, float] = (-87.65, 41.85),
                  km_span: float = 100, random_seed: int = 222):
-        """
-        Args:
-            size: Grid dimension (size × size points)
-            coord_system: 'grid' (centered at 0) or 'regional' (geographic coords)
-            center_coords: (lon, lat) center for regional coords
-            km_span: Geographic span in km for regional coords
-            random_seed: Random seed for reproducibility
-        """
         self.size = size
         self.coord_system = coord_system
         self.center_coords = center_coords
@@ -40,8 +32,8 @@ class GridDGP:
         
         if self.coord_system == 'grid':
             coords = np.column_stack([uu.ravel(), vv.ravel()])
-            # IMPORTANT: Keep raw coordinates [0, size-1], don't center at 0
-            # Centered coordinates reduce numeric range and hurt amplitude recovery
+            # IMPORTANT: Keep raw coordinates [0, size-1], don't center at 0.
+            # Centered coordinates reduce numeric range and hurt amplitude recovery.
             extent = (coords[:, 0].min(), coords[:, 0].max(),
                      coords[:, 1].min(), coords[:, 1].max())
             return coords, extent
@@ -141,11 +133,6 @@ class CountyDGP:
     """Generate synthetic data for US counties."""
     
     def __init__(self, shapefile_path: Optional[str] = None, random_seed: int = 222):
-        """
-        Args:
-            shapefile_path: Path to counties shapefile (downloads if None)
-            random_seed: Random seed
-        """
         self.random_seed = random_seed
         np.random.seed(random_seed)
         self.counties_gdf = self._load_counties(shapefile_path)

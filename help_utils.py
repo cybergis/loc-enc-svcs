@@ -1,34 +1,32 @@
+"""
+Utility functions for location encoding, spatial metrics, and visualization.
+
+Handles TorchSpatial encoder integration and provides metric calculations
+for comparing true vs. estimated spatially-varying coefficients.
+"""
+
+import os
+import sys
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-
-# --- Metric Calculation Imports ---
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression
-
-# +++ Additions for Moran's I +++
 from libpysal import weights
 from esda.moran import Moran
 
-# +++++++++++++++++++++++++++++++
-import os, sys
+# Add TorchSpatial/main to path so its modules are importable
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_TS_DIR = os.path.join(_HERE, "TorchSpatial", "main")
+if _TS_DIR not in sys.path:
+    sys.path.insert(0, _TS_DIR)
 
-# 1) Where is this script?
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-# 2) Point at the TorchSpatial/main folder so that its .py files become top-level modules
-TS_DIR = os.path.join(HERE, "TorchSpatial", "main")
-
-# 3) Prepend it to sys.path
-if TS_DIR not in sys.path:
-    sys.path.insert(0, TS_DIR)
-
-# 4) Now import exactly as TorchSpatial expects internally:
-from SpatialRelationEncoder import *
-from module import *
-from data_utils import *
-from utils import *
+from SpatialRelationEncoder import *  # noqa: E402
+from module import *  # noqa: E402
+from data_utils import *  # noqa: E402
+from utils import *  # noqa: E402
 
 SPA_EMBED_DIM = 4  # Default embedding dimension for spatial encoders
 
@@ -48,34 +46,33 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
     Returns:
         torch.Tensor: The location embeddings, a tensor of shape [batch_size, spa_embed_dim].
     """
-    # Handle extent parameter
     if extent is None:
-        print("⚠️  WARNING: No extent provided to get_loc_embeddings().")
-        print("   Using default extent (0, 200, 0, 200) which may not match your data!")
-        print("   For geographic coordinates, pass extent=(lon_min, lon_max, lat_min, lat_max)")
-        print("   For grid coordinates, pass the actual coordinate ranges.")
+        import warnings
+        warnings.warn(
+            "No extent provided to get_loc_embeddings(). "
+            "Using default (0, 200, 0, 200) which may not match your data.",
+            stacklevel=2
+        )
         extent = (0, 200, 0, 200)
-    
-    # Define the parameter dictionary.
+
     params = {
-        "spa_enc_type": encoder_type,  # use the provided encoder type
-        "spa_embed_dim": SPA_EMBED_DIM,  # embedding dimension
-        "extent": extent,  # extent of the coordinates (now configurable!)
-        "freq": 16,  # number of scales (related to multi-scale Fourier features)
-        "max_radius": 1,  # maximum scale (lambda_max)
-        "min_radius": 0.0001,  # minimum scale (lambda_min)
-        "spa_f_act": "leakyrelu",  # non-linear activation function
-        "freq_init": "geometric",  # Fourier frequency initialization
-        "num_hidden_layer": 1,  # number of hidden layers in the encoder
-        "dropout": 0.5,  # dropout rate
-        "hidden_dim": 64,  # hidden dimension of the MLP (if applicable)
-        "use_layn": True,  # use layer normalization flag
-        "skip_connection": True,  # apply skip connections
-        "spa_enc_use_postmat": True,  # whether to use the post-processing matrix
-        "device": device,  # device for computation
+        "spa_enc_type": encoder_type,
+        "spa_embed_dim": SPA_EMBED_DIM,
+        "extent": extent,
+        "freq": 16,
+        "max_radius": 1,
+        "min_radius": 0.0001,
+        "spa_f_act": "leakyrelu",
+        "freq_init": "geometric",
+        "num_hidden_layer": 1,
+        "dropout": 0.5,
+        "hidden_dim": 64,
+        "use_layn": True,
+        "skip_connection": True,
+        "spa_enc_use_postmat": True,
+        "device": device,
     }
 
-    # Instantiate the spatial relation encoder using the parameters.
     loc_enc = get_spa_encoder(
         train_locs=[],  # no training coordinates provided here
         params=params,
@@ -92,19 +89,14 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
         device=params["device"],
     ).to(params["device"])
 
-    # Ensure coords is a NumPy array. If coords is 2D ([batch_size, 2]),
-    # expand dims so that it has shape [batch_size, 1, 2] as required by the encoder.
     coords = np.array(coords)
     if coords.ndim == 2:
         coords = np.expand_dims(coords, axis=1)
 
-    # Pass the coordinates through the encoder.
-    # The mapping is mathematically represented as: loc_embeds = f(coords)
     loc_embeds = torch.squeeze(loc_enc(coords))
     return loc_embeds
 
 
-# --- Plotting Function ---
 def plot_s(
     bs, size, vmin=None, vmax=None, title="", filename=None, experiment_dir=None
 ):
@@ -248,7 +240,7 @@ def plot_s(
         plt.close(fig)
 
 
-# --- Spatial Effect Metric Calculation Functions ---
+# --- Spatial Metrics ---
 def calculate_spatial_metrics(
     true_surface,
     estimated_surface,
@@ -257,18 +249,13 @@ def calculate_spatial_metrics(
     model_name,
     coords_for_moran,
     grid_size=None,
-):  # ++ Added coords_for_moran
+):
     """
-    Calculates various metrics comparing true and estimated spatial surfaces.
-    Now includes Moran's I for the residuals.
+    Compare true and estimated spatial surfaces with multiple metrics.
 
-    Parameters:
-        true_surface (np.ndarray): The true surface values.
-        estimated_surface (np.ndarray): The estimated surface values.
-        effect_name (str): Name of the effect being measured (e.g., "Intercept", "SVC_X1_Raw").
-        encoder_name (str): Name of the encoder used.
-        model_name (str): Name of the model used (e.g., "MLP", "XGBoost").
-        coords_for_moran (np.ndarray): Array of shape [n_samples, 2] for Moran's I calculation.
+    Returns a dict with error metrics (MSE, RMSE, MAE), correlation (Pearson r),
+    amplitude diagnostics (OLS slope, range/std ratios), and spatial
+    autocorrelation (Moran's I) on residuals and surfaces.
     """
     if true_surface is None or estimated_surface is None:
         print(
@@ -351,10 +338,8 @@ def calculate_spatial_metrics(
         metrics["r2_score"] = r2_score(true_valid, est_valid)
         metrics["mean_error_bias"] = np.mean(est_valid - true_valid)
         
-        # ========== ENHANCED METRICS FOR AMPLITUDE DIAGNOSIS ==========
-        
-        # 1. OLS Regression: est = intercept + slope * true
-        # This tells us if the model recovers the right amplitude (slope ≈ 1 is good)
+        # OLS regression: est = intercept + slope * true
+        # slope ~ 1 means correct amplitude recovery
         try:
             if np.std(true_valid) > 1e-6:
                 lr = LinearRegression()
@@ -372,7 +357,7 @@ def calculate_spatial_metrics(
             metrics["ols_intercept"] = np.nan
             metrics["ols_r2"] = np.nan
         
-        # 2. Amplitude Ratios: How much of the signal range/std is recovered?
+        # Amplitude ratios
         true_range = true_valid.max() - true_valid.min()
         est_range = est_valid.max() - est_valid.min()
         metrics["amplitude_range_ratio"] = est_range / true_range if true_range > 1e-6 else np.nan
@@ -381,18 +366,18 @@ def calculate_spatial_metrics(
         est_std = np.std(est_valid)
         metrics["amplitude_std_ratio"] = est_std / true_std if true_std > 1e-6 else np.nan
         
-        # 3. Normalized RMSE: Scale RMSE by true signal range/std
+        # Normalized RMSE
         metrics["rmse_normalized_by_range"] = metrics["rmse"] / true_range if true_range > 1e-6 else np.nan
         metrics["rmse_normalized_by_std"] = metrics["rmse"] / true_std if true_std > 1e-6 else np.nan
         
-        # 4. Mean Absolute Percentage Error (if values not too close to zero)
-        if np.all(np.abs(true_valid) > 0.1):  # Avoid division by small numbers
+        # MAPE (only when values aren't near zero)
+        if np.all(np.abs(true_valid) > 0.1):
             mape = np.mean(np.abs((true_valid - est_valid) / true_valid)) * 100
             metrics["mape_percent"] = mape
         else:
             metrics["mape_percent"] = np.nan
-        
-        # ========== END ENHANCED METRICS ==========
+
+        # Moran's I on residuals and surfaces
 
         metrics["moran_i_residuals"] = np.nan
         metrics["moran_i_residuals_p_value"] = np.nan
@@ -585,7 +570,7 @@ def interpret_metrics(metrics_dict, verbose=True):
     
     if not diagnosis:
         if overall_score >= 4:
-            diagnosis.append("✓ Good recovery - both shape and amplitude well captured")
+            diagnosis.append("Good recovery - both shape and amplitude well captured")
         else:
             diagnosis.append("Multiple issues detected - check individual metrics")
     
