@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 # --- Metric Calculation Imports ---
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
+from sklearn.linear_model import LinearRegression
 
 # +++ Additions for Moran's I +++
 from libpysal import weights
@@ -16,8 +17,8 @@ import os, sys
 # 1) Where is this script?
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# 2) Point at the TorchSpatial folder so that its .py files become top-level modules
-TS_DIR = os.path.join(HERE, "TorchSpatial")
+# 2) Point at the TorchSpatial/main folder so that its .py files become top-level modules
+TS_DIR = os.path.join(HERE, "TorchSpatial", "main")
 
 # 3) Prepend it to sys.path
 if TS_DIR not in sys.path:
@@ -29,26 +30,37 @@ from module import *
 from data_utils import *
 from utils import *
 
-SPA_EMBED_DIM = 12  # Default embedding dimension for spatial encoders
+SPA_EMBED_DIM = 4  # Default embedding dimension for spatial encoders
 
 
-def get_loc_embeddings(coords, encoder_type, device="cpu"):
+def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
     """
     Compute location embeddings for 2D coordinates using the specified spatial encoder type.
 
     Parameters:
         coords (np.ndarray): Array of shape [batch_size, 2] containing the coordinates.
         encoder_type (str): The string identifier for the spatial encoder (e.g., 'Space2Vec-grid', 'NeRF', etc).
+        extent (tuple): The spatial extent as (x_min, x_max, y_min, y_max). 
+                       For geographic data, use (lon_min, lon_max, lat_min, lat_max).
+                       If None, will use a default that may not be appropriate for your data.
         device (str): Device to use for the computation ('cpu', 'cuda:0', etc).
 
     Returns:
         torch.Tensor: The location embeddings, a tensor of shape [batch_size, spa_embed_dim].
     """
+    # Handle extent parameter
+    if extent is None:
+        print("⚠️  WARNING: No extent provided to get_loc_embeddings().")
+        print("   Using default extent (0, 200, 0, 200) which may not match your data!")
+        print("   For geographic coordinates, pass extent=(lon_min, lon_max, lat_min, lat_max)")
+        print("   For grid coordinates, pass the actual coordinate ranges.")
+        extent = (0, 200, 0, 200)
+    
     # Define the parameter dictionary.
     params = {
         "spa_enc_type": encoder_type,  # use the provided encoder type
         "spa_embed_dim": SPA_EMBED_DIM,  # embedding dimension
-        "extent": (0, 200, 0, 200),  # extent of the coordinates
+        "extent": extent,  # extent of the coordinates (now configurable!)
         "freq": 16,  # number of scales (related to multi-scale Fourier features)
         "max_radius": 1,  # maximum scale (lambda_max)
         "min_radius": 0.0001,  # minimum scale (lambda_min)
@@ -56,7 +68,7 @@ def get_loc_embeddings(coords, encoder_type, device="cpu"):
         "freq_init": "geometric",  # Fourier frequency initialization
         "num_hidden_layer": 1,  # number of hidden layers in the encoder
         "dropout": 0.5,  # dropout rate
-        "hidden_dim": 512,  # hidden dimension of the MLP (if applicable)
+        "hidden_dim": 64,  # hidden dimension of the MLP (if applicable)
         "use_layn": True,  # use layer normalization flag
         "skip_connection": True,  # apply skip connections
         "spa_enc_use_postmat": True,  # whether to use the post-processing matrix
@@ -288,6 +300,7 @@ def calculate_spatial_metrics(
             print(
                 f"Warning: Not enough valid data points ({np.sum(mask)}) for metrics calculation for {effect_name} ({encoder_name}/{model_name})."
             )
+            # Initialize all metrics as NaN
             metrics.update(
                 {
                     m_key: np.nan
@@ -299,6 +312,14 @@ def calculate_spatial_metrics(
                         "pearson_r_squared",
                         "r2_score",
                         "mean_error_bias",
+                        "ols_slope",
+                        "ols_intercept",
+                        "ols_r2",
+                        "amplitude_range_ratio",
+                        "amplitude_std_ratio",
+                        "rmse_normalized_by_range",
+                        "rmse_normalized_by_std",
+                        "mape_percent",
                         "moran_i_residuals",
                         "moran_i_residuals_p_value",
                     ]
@@ -314,7 +335,7 @@ def calculate_spatial_metrics(
             else None
         )
 
-        # Calculate metrics
+        # Calculate basic metrics
         metrics["mse"] = mean_squared_error(true_valid, est_valid)
         metrics["rmse"] = np.sqrt(metrics["mse"])
         metrics["mae"] = mean_absolute_error(true_valid, est_valid)
@@ -329,9 +350,56 @@ def calculate_spatial_metrics(
 
         metrics["r2_score"] = r2_score(true_valid, est_valid)
         metrics["mean_error_bias"] = np.mean(est_valid - true_valid)
+        
+        # ========== ENHANCED METRICS FOR AMPLITUDE DIAGNOSIS ==========
+        
+        # 1. OLS Regression: est = intercept + slope * true
+        # This tells us if the model recovers the right amplitude (slope ≈ 1 is good)
+        try:
+            if np.std(true_valid) > 1e-6:
+                lr = LinearRegression()
+                lr.fit(true_valid.reshape(-1, 1), est_valid)
+                metrics["ols_slope"] = float(lr.coef_[0])
+                metrics["ols_intercept"] = float(lr.intercept_)
+                metrics["ols_r2"] = float(lr.score(true_valid.reshape(-1, 1), est_valid))
+            else:
+                metrics["ols_slope"] = np.nan
+                metrics["ols_intercept"] = np.nan
+                metrics["ols_r2"] = np.nan
+        except Exception as e:
+            print(f"  Warning: Could not compute OLS metrics for {effect_name}: {e}")
+            metrics["ols_slope"] = np.nan
+            metrics["ols_intercept"] = np.nan
+            metrics["ols_r2"] = np.nan
+        
+        # 2. Amplitude Ratios: How much of the signal range/std is recovered?
+        true_range = true_valid.max() - true_valid.min()
+        est_range = est_valid.max() - est_valid.min()
+        metrics["amplitude_range_ratio"] = est_range / true_range if true_range > 1e-6 else np.nan
+        
+        true_std = np.std(true_valid)
+        est_std = np.std(est_valid)
+        metrics["amplitude_std_ratio"] = est_std / true_std if true_std > 1e-6 else np.nan
+        
+        # 3. Normalized RMSE: Scale RMSE by true signal range/std
+        metrics["rmse_normalized_by_range"] = metrics["rmse"] / true_range if true_range > 1e-6 else np.nan
+        metrics["rmse_normalized_by_std"] = metrics["rmse"] / true_std if true_std > 1e-6 else np.nan
+        
+        # 4. Mean Absolute Percentage Error (if values not too close to zero)
+        if np.all(np.abs(true_valid) > 0.1):  # Avoid division by small numbers
+            mape = np.mean(np.abs((true_valid - est_valid) / true_valid)) * 100
+            metrics["mape_percent"] = mape
+        else:
+            metrics["mape_percent"] = np.nan
+        
+        # ========== END ENHANCED METRICS ==========
 
         metrics["moran_i_residuals"] = np.nan
         metrics["moran_i_residuals_p_value"] = np.nan
+        metrics["moran_i_true_surface"] = np.nan
+        metrics["moran_i_true_surface_p_value"] = np.nan
+        metrics["moran_i_estimated_surface"] = np.nan
+        metrics["moran_i_estimated_surface_p_value"] = np.nan
 
         if (
             moran_calculated_successfully
@@ -339,40 +407,61 @@ def calculate_spatial_metrics(
             and coords_valid.shape[0] > 1
         ):  # Need at least 2 points for weights
             residuals = est_valid - true_valid
-            if np.std(residuals) > 1e-9:  # Check if residuals are not constant
-                try:
-                    # Create spatial weights matrix (Queen contiguity)
-                    # Ensure coords_valid is in the correct format for weights.Queen.from_array
-                    # It expects an array of point coordinates.
-                    if (
-                        residuals.shape[0] == grid_size * grid_size
-                    ):  # Ensure it's for the full grid
-                        w = weights.lat2W(
-                            nrows=grid_size, ncols=grid_size, rook=False
-                        )  # Use 'rook' for Rook contiguity
-                        w.transform = "r"  # Row-standardize
+            
+            if (
+                residuals.shape[0] == grid_size * grid_size
+            ):  # Ensure it's for the full grid
+                w = weights.lat2W(
+                    nrows=grid_size, ncols=grid_size, rook=False
+                )  # Use 'rook' for Rook contiguity
+                w.transform = "r"  # Row-standardize
+                
+                # Moran's I on residuals (existing)
+                if np.std(residuals) > 1e-9:  # Check if residuals are not constant
+                    try:
                         moran_result = Moran(residuals, w, permutations=99)
                         metrics["moran_i_residuals"] = moran_result.I
                         metrics["moran_i_residuals_p_value"] = moran_result.p_sim
-                    else:
+                    except Exception as e:
                         print(
-                            f"Warning: Moran's I calculation skipped for {effect_name} ({encoder_name}/{model_name}) because the number of residuals ({residuals.shape[0]}) does not match the expected grid size ({SIZE*SIZE})."
+                            f"Error calculating Moran's I on residuals for {effect_name} ({encoder_name}/{model_name}): {e}"
                         )
-                        metrics["moran_i_residuals"] = np.nan
-                        metrics["moran_i_residuals_p_value"] = np.nan
-                except Exception as e:
+                else:
                     print(
-                        f"Error calculating Moran's I for {effect_name} ({encoder_name}/{model_name}): {e}"
+                        f"Note: Residuals are constant for {effect_name} ({encoder_name}/{model_name}). Skipping Moran's I on residuals."
                     )
+                
+                # Moran's I on TRUE surface (NEW)
+                if np.std(true_valid) > 1e-9:
+                    try:
+                        moran_true = Moran(true_valid, w, permutations=99)
+                        metrics["moran_i_true_surface"] = moran_true.I
+                        metrics["moran_i_true_surface_p_value"] = moran_true.p_sim
+                    except Exception as e:
+                        print(
+                            f"Error calculating Moran's I on true surface for {effect_name} ({encoder_name}/{model_name}): {e}"
+                        )
+                
+                # Moran's I on ESTIMATED surface (NEW)
+                if np.std(est_valid) > 1e-9:
+                    try:
+                        moran_est = Moran(est_valid, w, permutations=99)
+                        metrics["moran_i_estimated_surface"] = moran_est.I
+                        metrics["moran_i_estimated_surface_p_value"] = moran_est.p_sim
+                    except Exception as e:
+                        print(
+                            f"Error calculating Moran's I on estimated surface for {effect_name} ({encoder_name}/{model_name}): {e}"
+                        )
             else:
                 print(
-                    f"Note: Residuals are constant for {effect_name} ({encoder_name}/{model_name}). Skipping Moran's I."
+                    f"Warning: Moran's I calculation skipped for {effect_name} ({encoder_name}/{model_name}) because the number of points ({residuals.shape[0]}) does not match the expected grid size ({grid_size*grid_size if grid_size else 'unknown'})."
                 )
 
     except Exception as e:
         print(
             f"Error calculating metrics for {effect_name} ({encoder_name}/{model_name}): {e}"
         )
+        # Ensure all metric keys exist
         for m_key in [
             "mse",
             "rmse",
@@ -381,9 +470,140 @@ def calculate_spatial_metrics(
             "pearson_r_squared",
             "r2_score",
             "mean_error_bias",
+            "ols_slope",
+            "ols_intercept",
+            "ols_r2",
+            "amplitude_range_ratio",
+            "amplitude_std_ratio",
+            "rmse_normalized_by_range",
+            "rmse_normalized_by_std",
+            "mape_percent",
             "moran_i_residuals",
             "moran_i_residuals_p_value",
+            "moran_i_true_surface",
+            "moran_i_true_surface_p_value",
+            "moran_i_estimated_surface",
+            "moran_i_estimated_surface_p_value",
         ]:
             if m_key not in metrics:
                 metrics[m_key] = np.nan
     return metrics
+
+
+def interpret_metrics(metrics_dict, verbose=True):
+    """
+    Interpret spatial effect recovery metrics and provide diagnostic summary.
+    
+    Args:
+        metrics_dict: Dictionary of metrics from calculate_spatial_metrics
+        verbose: If True, prints interpretation
+        
+    Returns:
+        dict with interpretation categories and scores
+    """
+    interpretation = {
+        "effect_name": metrics_dict.get("spatial_effect", "Unknown"),
+        "encoder": metrics_dict.get("encoder", "Unknown"),
+        "model": metrics_dict.get("model", "Unknown"),
+    }
+    
+    # Extract key metrics
+    pearson_r = metrics_dict.get("pearson_r", np.nan)
+    ols_slope = metrics_dict.get("ols_slope", np.nan)
+    amplitude_ratio = metrics_dict.get("amplitude_range_ratio", np.nan)
+    rmse_norm = metrics_dict.get("rmse_normalized_by_std", np.nan)
+    
+    # Shape recovery (correlation)
+    if pearson_r >= 0.9:
+        shape_quality = "Excellent"
+        shape_score = 5
+    elif pearson_r >= 0.7:
+        shape_quality = "Good"
+        shape_score = 4
+    elif pearson_r >= 0.5:
+        shape_quality = "Moderate"
+        shape_score = 3
+    elif pearson_r >= 0.3:
+        shape_quality = "Weak"
+        shape_score = 2
+    else:
+        shape_quality = "Poor/None"
+        shape_score = 1
+    
+    interpretation["shape_quality"] = shape_quality
+    interpretation["shape_score"] = shape_score
+    
+    # Amplitude recovery (OLS slope)
+    if ols_slope >= 0.9:
+        amplitude_quality = "Excellent"
+        amplitude_score = 5
+    elif ols_slope >= 0.7:
+        amplitude_quality = "Good"
+        amplitude_score = 4
+    elif ols_slope >= 0.5:
+        amplitude_quality = "Moderate"
+        amplitude_score = 3
+    elif ols_slope >= 0.3:
+        amplitude_quality = "Weak"
+        amplitude_score = 2
+    else:
+        amplitude_quality = "Poor/None"
+        amplitude_score = 1
+    
+    interpretation["amplitude_quality"] = amplitude_quality
+    interpretation["amplitude_score"] = amplitude_score
+    
+    # Overall recovery
+    overall_score = (shape_score + amplitude_score) / 2
+    if overall_score >= 4.5:
+        overall_quality = "Excellent - Near-perfect recovery"
+    elif overall_score >= 3.5:
+        overall_quality = "Good - Useful for interpretation"
+    elif overall_score >= 2.5:
+        overall_quality = "Moderate - Pattern detected but weak"
+    else:
+        overall_quality = "Poor - Substantial issues"
+    
+    interpretation["overall_quality"] = overall_quality
+    interpretation["overall_score"] = overall_score
+    
+    # Diagnosis
+    diagnosis = []
+    if pearson_r > 0.5 and ols_slope < 0.5:
+        diagnosis.append("AMPLITUDE COMPRESSION: Shape captured but magnitude too small")
+        diagnosis.append("  → Try: feature scaling, reduce regularization, increase model capacity")
+    elif pearson_r < 0.3:
+        diagnosis.append("SHAPE MISMATCH: Model not capturing spatial pattern")
+        diagnosis.append("  → Try: check encoder extent, increase model capacity, more training data")
+    elif ols_slope > 1.3:
+        diagnosis.append("AMPLITUDE INFLATION: Magnitude too large")
+        diagnosis.append("  → Try: increase regularization, check for overfitting")
+    
+    if rmse_norm > 0.5 and pearson_r > 0.7:
+        diagnosis.append("HIGH NOISE: Good pattern but large errors")
+        diagnosis.append("  → Model variance is high, consider ensemble or more data")
+    
+    if not diagnosis:
+        if overall_score >= 4:
+            diagnosis.append("✓ Good recovery - both shape and amplitude well captured")
+        else:
+            diagnosis.append("Multiple issues detected - check individual metrics")
+    
+    interpretation["diagnosis"] = diagnosis
+    
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"METRIC INTERPRETATION: {interpretation['effect_name']}")
+        print(f"Encoder: {interpretation['encoder']} | Model: {interpretation['model']}")
+        print(f"{'='*70}")
+        print(f"\n  Shape Recovery:     {shape_quality:15s} (r={pearson_r:.3f})")
+        print(f"  Amplitude Recovery: {amplitude_quality:15s} (slope={ols_slope:.3f}, ratio={amplitude_ratio:.3f})")
+        print(f"  Overall:            {overall_quality}")
+        print(f"\n  Diagnosis:")
+        for diag in diagnosis:
+            print(f"    {diag}")
+        print(f"{'='*70}\n")
+    
+    return interpretation
+
+
