@@ -97,6 +97,100 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
     return loc_embeds
 
 
+def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
+                      device="cpu", n_epochs=500, lr=1e-3, random_seed=None):
+    """
+    Train a location encoder jointly with a linear prediction head on the regression task.
+
+    The encoder's NN() layers (MultiLayerFeedForwardNN) are trained via backprop.
+    The PE() position encoding is fixed/deterministic and receives no gradient updates.
+    Training uses only the provided data — caller must pass train-set-only arrays.
+
+    Args:
+        coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
+        X1, X2:      np.ndarray [N], covariates — TRAIN SET ONLY
+        y:            np.ndarray [N], response — TRAIN SET ONLY
+        encoder_type: TorchSpatial encoder string (e.g. 'Space2Vec-theory', 'NeRF')
+        extent:       (xmin, xmax, ymin, ymax)
+        device:       'cpu' or 'cuda:0'
+        n_epochs:     number of Adam gradient steps (default 500, ~seconds for 3000 pts)
+        lr:           Adam learning rate (default 1e-3)
+        random_seed:  torch manual seed for reproducibility
+
+    Returns:
+        loc_enc: trained nn.Module in eval() mode, ready for embedding extraction
+    """
+    import torch.nn as nn
+    import torch.optim as optim
+
+    if random_seed is not None:
+        torch.manual_seed(random_seed)
+
+    params = {
+        "spa_enc_type": encoder_type,
+        "spa_embed_dim": SPA_EMBED_DIM,
+        "extent": extent,
+        "freq": 16,
+        "max_radius": 1,
+        "min_radius": 0.0001,
+        "spa_f_act": "leakyrelu",
+        "freq_init": "geometric",
+        "num_hidden_layer": 1,
+        "dropout": 0.5,
+        "hidden_dim": 64,
+        "use_layn": True,
+        "skip_connection": True,
+        "spa_enc_use_postmat": True,
+        "device": device,
+    }
+
+    loc_enc = get_spa_encoder(
+        train_locs=[],
+        params=params,
+        spa_enc_type=params["spa_enc_type"],
+        spa_embed_dim=params["spa_embed_dim"],
+        extent=params["extent"],
+        coord_dim=2,
+        frequency_num=params["freq"],
+        max_radius=params["max_radius"],
+        min_radius=params["min_radius"],
+        f_act=params["spa_f_act"],
+        freq_init=params["freq_init"],
+        use_postmat=params["spa_enc_use_postmat"],
+        device=params["device"],
+    ).to(device)
+
+    # Lightweight prediction head: [X1, X2, emb_0..emb_{d-1}] -> y
+    head = nn.Linear(2 + SPA_EMBED_DIM, 1).to(device)
+
+    optimizer = optim.Adam(
+        list(loc_enc.parameters()) + list(head.parameters()), lr=lr
+    )
+
+    X_t = torch.tensor(
+        np.stack([X1, X2], axis=1), dtype=torch.float32
+    ).to(device)
+    y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
+
+    coords_enc = np.expand_dims(np.array(coords), axis=1)  # [N, 1, 2]
+
+    loc_enc.train()
+    for _ in range(n_epochs):
+        optimizer.zero_grad()
+        emb = loc_enc(coords_enc)          # [N, 1, SPA_EMBED_DIM] or [N, SPA_EMBED_DIM]
+        emb = torch.squeeze(emb)           # [N, SPA_EMBED_DIM]
+        if emb.ndim == 1:
+            emb = emb.unsqueeze(0)
+        features = torch.cat([X_t, emb], dim=1)  # [N, 2 + SPA_EMBED_DIM]
+        y_pred = head(features)                   # [N, 1]
+        loss = torch.nn.functional.mse_loss(y_pred, y_t)
+        loss.backward()
+        optimizer.step()
+
+    loc_enc.eval()
+    return loc_enc
+
+
 def plot_s(
     bs, size, vmin=None, vmax=None, title="", filename=None, experiment_dir=None
 ):
@@ -438,9 +532,30 @@ def calculate_spatial_metrics(
                             f"Error calculating Moran's I on estimated surface for {effect_name} ({encoder_name}/{model_name}): {e}"
                         )
             else:
-                print(
-                    f"Warning: Moran's I calculation skipped for {effect_name} ({encoder_name}/{model_name}) because the number of points ({residuals.shape[0]}) does not match the expected grid size ({grid_size*grid_size if grid_size else 'unknown'})."
-                )
+                # grid_size is None (e.g. counties) or points don't match grid — use KNN weights
+                try:
+                    w_knn = weights.KNN.from_array(coords_valid, k=min(8, coords_valid.shape[0] - 1))
+                    w_knn.transform = "r"
+
+                    if np.std(residuals) > 1e-9:
+                        moran_result = Moran(residuals, w_knn, permutations=99)
+                        metrics["moran_i_residuals"] = moran_result.I
+                        metrics["moran_i_residuals_p_value"] = moran_result.p_sim
+
+                    if np.std(true_valid) > 1e-9:
+                        moran_true = Moran(true_valid, w_knn, permutations=99)
+                        metrics["moran_i_true_surface"] = moran_true.I
+                        metrics["moran_i_true_surface_p_value"] = moran_true.p_sim
+
+                    if np.std(est_valid) > 1e-9:
+                        moran_est = Moran(est_valid, w_knn, permutations=99)
+                        metrics["moran_i_estimated_surface"] = moran_est.I
+                        metrics["moran_i_estimated_surface_p_value"] = moran_est.p_sim
+                except Exception as e:
+                    print(
+                        f"Warning: KNN-based Moran's I failed for {effect_name} "
+                        f"({encoder_name}/{model_name}): {e}"
+                    )
 
     except Exception as e:
         print(

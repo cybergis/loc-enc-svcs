@@ -19,7 +19,7 @@ from flaml import AutoML
 from geoshapley import GeoShapleyExplainer
 
 from dgp_utils import create_county_data
-from help_utils import calculate_spatial_metrics, get_loc_embeddings
+from help_utils import calculate_spatial_metrics, get_loc_embeddings, train_loc_encoder
 
 
 # Encoder configurations (TorchSpatial encoder type names)
@@ -48,6 +48,12 @@ parser.add_argument('--shapefile_path', type=str, default=None)
 parser.add_argument('--noise_std', type=float, default=0.1)
 parser.add_argument('--output_dir', type=str, default='./results/counties')
 parser.add_argument('--random_seed', type=int, default=222)
+parser.add_argument('--train_encoder', action='store_true', default=False,
+                    help='Train encoder on regression task before extracting embeddings')
+parser.add_argument('--encoder_epochs', type=int, default=500,
+                    help='Training epochs for location encoder (default: 500)')
+parser.add_argument('--encoder_lr', type=float, default=1e-3,
+                    help='Learning rate for encoder training (default: 0.001)')
 
 args = parser.parse_args()
 
@@ -86,21 +92,45 @@ for repetition in range(args.num_repetitions):
         true_b2 = data['b2'].values
         
         print(f"  Generated {len(data)} counties")
-        
+
+        # Compute train indices early so encoder training uses only train data
+        _all_idx = np.arange(len(data))
+        train_idx, _ = train_test_split(_all_idx, test_size=0.20, random_state=rep_seed)
+
         # Generate embeddings
         print(f"\n[2/6] Generating location embeddings: {encoder_name}...")
-        
+
         if encoder_type is None:
             embeddings = np.zeros((len(data), 0))
             print("  No encoder (baseline)")
         else:
             try:
-                embeddings_result = get_loc_embeddings(
-                    coords,
-                    encoder_type=encoder_type,
-                    extent=extent,
-                    device="cpu"  # CPU avoids CUDA tensor pickling issues
-                )
+                if args.train_encoder:
+                    print(f"  Training encoder on {len(train_idx)} train counties "
+                          f"({args.encoder_epochs} epochs, lr={args.encoder_lr})...")
+                    _trained_enc = train_loc_encoder(
+                        coords=coords[train_idx],
+                        X1=X1[train_idx],
+                        X2=X2[train_idx],
+                        y=y[train_idx],
+                        encoder_type=encoder_type,
+                        extent=extent,
+                        device="cpu",
+                        n_epochs=args.encoder_epochs,
+                        lr=args.encoder_lr,
+                        random_seed=rep_seed,
+                    )
+                    import torch as _torch
+                    with _torch.no_grad():
+                        _coords_enc = np.expand_dims(coords, axis=1)
+                        embeddings_result = _trained_enc(_coords_enc)
+                else:
+                    embeddings_result = get_loc_embeddings(
+                        coords,
+                        encoder_type=encoder_type,
+                        extent=extent,
+                        device="cpu"  # CPU avoids CUDA tensor pickling issues
+                    )
                 
                 # Handle tensor and array returns
                 if isinstance(embeddings_result, torch.Tensor):
@@ -286,6 +316,8 @@ for repetition in range(args.num_repetitions):
         metrics['repetition'] = repetition
         metrics['train_r2'] = train_score
         metrics['test_r2'] = test_score
+        metrics['encoder_trained'] = args.train_encoder
+        metrics['encoder_epochs'] = args.encoder_epochs if args.train_encoder else 0
         metrics['moran_i_predictions'] = moran_i_predictions
         metrics['moran_i_predictions_pval'] = moran_i_predictions_pval
         
