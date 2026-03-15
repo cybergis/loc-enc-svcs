@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
-#SBATCH --time=20:00:00
+#SBATCH --time=06:00:00
 #SBATCH --mem=8G
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
