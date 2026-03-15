@@ -10,6 +10,7 @@ Everything else lives here.
 """
 
 import argparse
+import time
 import traceback
 
 import numpy as np
@@ -222,8 +223,10 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
     output_dir.mkdir(exist_ok=True, parents=True)
 
     all_metrics = []
+    total_start = time.time()
 
     for repetition in range(args.num_repetitions):
+        rep_start = time.time()
         print(f"\n{'='*60}")
         print(f"{experiment_label} EXPERIMENT: {encoder_name} | {args.model_type} | Rep {repetition}")
         print(f"{'='*60}")
@@ -298,13 +301,18 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
             'b2_smooth': calculate_spatial_metrics(true_b2, shap_b2_smooth, "SVC_X2_Smooth",encoder_name, args.model_type, coords, grid_size),
         }
         metrics = pd.DataFrame(metrics_dict).T
+        rep_elapsed = time.time() - rep_start
+        print(f"  Rep {repetition} completed in {rep_elapsed:.1f}s ({rep_elapsed/60:.1f}m)")
+
         metrics['encoder']          = encoder_name
         metrics['model']            = args.model_type
         metrics['repetition']       = repetition
+        metrics['embed_dim']        = getattr(args, 'embed_dim', 4)
         metrics['train_r2']         = train_score
         metrics['test_r2']          = test_score
         metrics['encoder_trained']  = args.train_encoder
         metrics['encoder_epochs']   = args.encoder_epochs if args.train_encoder else 0
+        metrics['rep_time_sec']     = rep_elapsed
         metrics['moran_i_predictions']      = moran_i_pred
         metrics['moran_i_predictions_pval'] = moran_i_pred_pval
 
@@ -332,6 +340,7 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
         all_metrics.append(metrics)
 
     # Summary
+    total_elapsed = time.time() - total_start
     summary_file = output_dir / f'{encoder_name}_{args.model_type}_summary.csv'
     pd.concat(all_metrics, ignore_index=True).to_csv(summary_file, index=False)
-    print(f"\n{'='*60}\nCOMPLETED ALL REPETITIONS\n  Summary: {summary_file}\n{'='*60}")
+    print(f"\n{'='*60}\nCOMPLETED ALL REPETITIONS in {total_elapsed:.1f}s ({total_elapsed/60:.1f}m)\n  Summary: {summary_file}\n{'='*60}")
