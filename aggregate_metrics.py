@@ -26,7 +26,7 @@ def parse_dir_name(dirname):
     Expected patterns:
         global_simple_dim8, global_full_embonly_dim32, global_simple_baseline, etc.
     """
-    info = {'scale': None, 'dgp': None, 'feature_config': None, 'embed_dim': None}
+    info = {'scale': None, 'dgp': None, 'feature_config': None, 'embed_dim': None, 'encoder_trained': False}
 
     for scale in ('global', 'grid', 'counties', 'county'):
         if dirname.startswith(scale):
@@ -44,6 +44,8 @@ def parse_dir_name(dirname):
         info['feature_config'] = 'baseline'
     else:
         info['feature_config'] = 'emb+coords'
+
+    info['encoder_trained'] = 'trained' in dirname
 
     dim_match = re.search(r'dim(\d+)', dirname)
     if dim_match:
