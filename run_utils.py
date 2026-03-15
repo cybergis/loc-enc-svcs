@@ -314,16 +314,22 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
         )
 
         # [5] GeoShapley
-        print(f"\n[5/6] Extracting spatial effects with GeoShapley...")
-        try:
-            shap_b0, shap_b1_raw, shap_b2_raw, shap_b1_smooth, shap_b2_smooth = run_geoshapley(
-                model, X_train_gs, X_features, feature_names, coords
-            )
-            print(f"  Extracted spatial effects (raw & smoothed SVCs)")
-        except Exception as e:
-            print(f"ERROR during GeoShapley explanation: {type(e).__name__}: {e}")
-            traceback.print_exc()
-            raise
+        n_geo_feats = sum(1 for f in feature_names if f.startswith('emb_') or f in ('lon', 'lat'))
+        if n_geo_feats == 0:
+            print(f"\n[5/6] Skipping GeoShapley (no geo features — none encoder + no_coords)")
+            n = len(X_features)
+            shap_b0 = shap_b1_raw = shap_b2_raw = shap_b1_smooth = shap_b2_smooth = np.full(n, np.nan)
+        else:
+            print(f"\n[5/6] Extracting spatial effects with GeoShapley...")
+            try:
+                shap_b0, shap_b1_raw, shap_b2_raw, shap_b1_smooth, shap_b2_smooth = run_geoshapley(
+                    model, X_train_gs, X_features, feature_names, coords
+                )
+                print(f"  Extracted spatial effects (raw & smoothed SVCs)")
+            except Exception as e:
+                print(f"ERROR during GeoShapley explanation: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                raise
 
         # [6] Metrics
         print(f"\n[6/6] Computing metrics...")

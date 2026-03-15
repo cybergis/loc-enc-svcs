@@ -6,6 +6,7 @@ Li & Peng (2025, Geographical Analysis):
     y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + epsilon
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -165,9 +166,11 @@ class CountyDGP:
             '50', '51', '53', '54', '55', '56'
         ]
         gdf = gdf[gdf['STATEFP'].isin(continental)].copy()
-        gdf['centroid'] = gdf.geometry.centroid
-        gdf['lon'] = gdf.centroid.x
-        gdf['lat'] = gdf.centroid.y
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            gdf['centroid'] = gdf.geometry.centroid
+            gdf['lon'] = gdf.centroid.x
+            gdf['lat'] = gdf.centroid.y
         
         return gdf
     
