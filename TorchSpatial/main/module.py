@@ -43,6 +43,8 @@ def get_activation_function(activation, context_str):
         return nn.Tanh()
     elif activation == 'gelu':
         return nn.GELU()
+    elif activation == 'silu':
+        return nn.SiLU()
     else:
         raise Exception("{} activation not recognized.".format(context_str))
 

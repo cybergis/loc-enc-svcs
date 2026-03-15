@@ -53,6 +53,8 @@ def build_base_parser(description):
                         help='Train encoder before extracting embeddings')
     parser.add_argument('--encoder_epochs', type=int, default=500)
     parser.add_argument('--encoder_lr', type=float, default=1e-3)
+    parser.add_argument('--embed_dim', type=int, default=4,
+                        help='Embedding dimension for spatial encoders (default: 4)')
     parser.add_argument('--simple_dgp', action='store_true', default=False,
                         help='Use simple DGP (y=b0+b1*X1+b2*X2) instead of complex Li&Peng DGP')
     return parser
@@ -66,22 +68,22 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
         return np.zeros((len(coords), 0))
 
     try:
+        edim = getattr(args, 'embed_dim', 4)
         if args.train_encoder:
             print(f"  Training encoder on {len(train_idx)} points "
-                  f"({args.encoder_epochs} epochs, lr={args.encoder_lr})...")
-            # extent is stored on args by the caller
+                  f"({args.encoder_epochs} epochs, lr={args.encoder_lr}, dim={edim})...")
             trained_enc = train_loc_encoder(
                 coords=coords[train_idx], X1=X1[train_idx], X2=X2[train_idx],
                 y=y[train_idx], encoder_type=encoder_type, extent=args._extent,
                 device="cpu", n_epochs=args.encoder_epochs, lr=args.encoder_lr,
-                random_seed=args._rep_seed,
+                random_seed=args._rep_seed, embed_dim=edim,
             )
             with torch.no_grad():
                 result = trained_enc(np.expand_dims(coords, axis=1))
         else:
             result = get_loc_embeddings(
                 coords, encoder_type=encoder_type,
-                extent=args._extent, device="cpu",
+                extent=args._extent, device="cpu", embed_dim=edim,
             )
 
         if isinstance(result, torch.Tensor):

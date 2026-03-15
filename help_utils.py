@@ -28,7 +28,7 @@ from module import *  # noqa: E402
 from data_utils import *  # noqa: E402
 from utils import *  # noqa: E402
 
-SPA_EMBED_DIM = 4  # Default embedding dimension for spatial encoders
+SPA_EMBED_DIM = 4  # Default embedding dimension; overridable via get_loc_embeddings/train_loc_encoder
 
 # Encoders that normalize coordinates internally or convert to 3D — max_radius=1 is correct
 _EXTENT_NORMALIZED_ENCODERS = {'tile_ffn', 'wrap_ffn', 'rff', 'NeRF'}
@@ -44,21 +44,23 @@ def _get_max_radius(encoder_type, extent):
     return float(max(x_span, y_span))
 
 
-def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
+def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu",
+                       embed_dim=None, f_act="silu"):
     """
     Compute location embeddings for 2D coordinates using the specified spatial encoder type.
 
     Parameters:
         coords (np.ndarray): Array of shape [batch_size, 2] containing the coordinates.
-        encoder_type (str): The string identifier for the spatial encoder (e.g., 'Space2Vec-grid', 'NeRF', etc).
-        extent (tuple): The spatial extent as (x_min, x_max, y_min, y_max). 
-                       For geographic data, use (lon_min, lon_max, lat_min, lat_max).
-                       If None, will use a default that may not be appropriate for your data.
-        device (str): Device to use for the computation ('cpu', 'cuda:0', etc).
+        encoder_type (str): The string identifier for the spatial encoder.
+        extent (tuple): The spatial extent as (x_min, x_max, y_min, y_max).
+        device (str): Device to use for the computation.
+        embed_dim (int): Embedding dimension. Defaults to SPA_EMBED_DIM.
 
     Returns:
-        torch.Tensor: The location embeddings, a tensor of shape [batch_size, spa_embed_dim].
+        torch.Tensor: The location embeddings, shape [batch_size, embed_dim].
     """
+    dim = embed_dim if embed_dim is not None else SPA_EMBED_DIM
+
     if extent is None:
         import warnings
         warnings.warn(
@@ -70,12 +72,12 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
 
     params = {
         "spa_enc_type": encoder_type,
-        "spa_embed_dim": SPA_EMBED_DIM,
+        "spa_embed_dim": dim,
         "extent": extent,
         "freq": 16,
         "max_radius": _get_max_radius(encoder_type, extent),
         "min_radius": 0.0001,
-        "spa_f_act": "leakyrelu",
+        "spa_f_act": f_act,
         "freq_init": "geometric",
         "num_hidden_layer": 1,
         "dropout": 0.5,
@@ -87,12 +89,12 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
     }
 
     loc_enc = get_spa_encoder(
-        train_locs=[],  # no training coordinates provided here
+        train_locs=[],
         params=params,
         spa_enc_type=params["spa_enc_type"],
         spa_embed_dim=params["spa_embed_dim"],
         extent=params["extent"],
-        coord_dim=2,  # working in 2D
+        coord_dim=2,
         frequency_num=params["freq"],
         max_radius=params["max_radius"],
         min_radius=params["min_radius"],
@@ -102,55 +104,57 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
         device=params["device"],
     ).to(params["device"])
 
+    loc_enc.eval()  # Disable dropout for deterministic embeddings
+
     coords = np.array(coords)
     if coords.ndim == 2:
         coords = np.expand_dims(coords, axis=1)
 
-    loc_embeds = torch.squeeze(loc_enc(coords))
+    with torch.no_grad():
+        loc_embeds = torch.squeeze(loc_enc(coords))
     return loc_embeds
 
 
 def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
-                      device="cpu", n_epochs=500, lr=1e-3, random_seed=None):
+                      device="cpu", n_epochs=500, lr=1e-3, random_seed=None,
+                      embed_dim=None, f_act="silu"):
     """
     Train a location encoder to predict y from coordinates alone.
 
-    Following TorchSpatial's approach, the encoder only receives coordinates
-    as input. The prediction head maps embeddings → y without access to
-    covariates, forcing the encoder to capture all spatial information.
-
-    The encoder's NN() layers (MultiLayerFeedForwardNN) are trained via backprop.
-    The PE() position encoding is fixed/deterministic and receives no gradient updates.
-    Training uses only the provided data — caller must pass train-set-only arrays.
+    Following TorchSpatial's approach: single linear prediction head (no bias),
+    LR decay of 0.98/epoch, and the encoder only sees coordinates.
 
     Args:
         coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
-        X1, X2:      np.ndarray [N], covariates — passed for API compat, not used in training
+        X1, X2:      np.ndarray [N], covariates — passed for API compat, not used
         y:            np.ndarray [N], response — TRAIN SET ONLY
-        encoder_type: TorchSpatial encoder string (e.g. 'Space2Vec-theory', 'NeRF')
+        encoder_type: TorchSpatial encoder string (e.g. 'Space2Vec-theory')
         extent:       (xmin, xmax, ymin, ymax)
         device:       'cpu' or 'cuda:0'
-        n_epochs:     number of Adam gradient steps (default 500, ~seconds for 3000 pts)
-        lr:           Adam learning rate (default 1e-3)
+        n_epochs:     gradient steps (default 500)
+        lr:           initial Adam learning rate (default 1e-3)
         random_seed:  torch manual seed for reproducibility
+        embed_dim:    embedding dimension. Defaults to SPA_EMBED_DIM.
 
     Returns:
-        loc_enc: trained nn.Module in eval() mode, ready for embedding extraction
+        loc_enc: trained nn.Module in eval() mode
     """
     import torch.nn as nn
     import torch.optim as optim
+
+    dim = embed_dim if embed_dim is not None else SPA_EMBED_DIM
 
     if random_seed is not None:
         torch.manual_seed(random_seed)
 
     params = {
         "spa_enc_type": encoder_type,
-        "spa_embed_dim": SPA_EMBED_DIM,
+        "spa_embed_dim": dim,
         "extent": extent,
         "freq": 16,
         "max_radius": _get_max_radius(encoder_type, extent),
         "min_radius": 0.0001,
-        "spa_f_act": "leakyrelu",
+        "spa_f_act": f_act,
         "freq_init": "geometric",
         "num_hidden_layer": 1,
         "dropout": 0.5,
@@ -177,33 +181,30 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         device=params["device"],
     ).to(device)
 
-    # Prediction head: embeddings only → y (no covariates).
-    # Forces encoder to capture all spatial info in embeddings.
-    head = nn.Sequential(
-        nn.Linear(SPA_EMBED_DIM, 64),
-        nn.ReLU(),
-        nn.Linear(64, 1),
-    ).to(device)
+    # Single linear head matching TorchSpatial's FCNet: Linear(embed_dim→1, no bias)
+    head = nn.Linear(dim, 1, bias=False).to(device)
+    nn.init.xavier_uniform_(head.weight)
 
     optimizer = optim.Adam(
         list(loc_enc.parameters()) + list(head.parameters()), lr=lr
     )
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
 
     y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
-
     coords_enc = np.expand_dims(np.array(coords), axis=1)  # [N, 1, 2]
 
     loc_enc.train()
     for _ in range(n_epochs):
         optimizer.zero_grad()
-        emb = loc_enc(coords_enc)          # [N, 1, SPA_EMBED_DIM] or [N, SPA_EMBED_DIM]
-        emb = torch.squeeze(emb)           # [N, SPA_EMBED_DIM]
+        emb = loc_enc(coords_enc)
+        emb = torch.squeeze(emb)
         if emb.ndim == 1:
             emb = emb.unsqueeze(0)
-        y_pred = head(emb)                        # [N, 1]
+        y_pred = head(emb)
         loss = torch.nn.functional.mse_loss(y_pred, y_t)
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
     loc_enc.eval()
     return loc_enc
