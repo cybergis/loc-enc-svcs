@@ -1,72 +1,178 @@
 """
-Aggregate per-encoder summary CSVs into combined results.
+Aggregate experiment results across all conditions.
 
-Reads all *_summary.csv files from a results directory and produces:
-  - all_encoders_all_repetitions.csv  (raw data)
-  - all_encoders_summary_stats.csv    (mean/std per encoder+model+effect)
+Scans results directories matching naming convention and produces:
+  - combined_all_reps.csv         (every row from every experiment)
+  - combined_summary_stats.csv    (mean/std per condition)
+  - comparison_table.csv          (key metrics pivoted for easy reading)
 
 Usage:
-    python aggregate_metrics.py --results_dir ./results/grid
+    python aggregate_metrics.py --results_root ./results
+    python aggregate_metrics.py --results_dir ./results/grid   # single dir mode
 """
 
 import argparse
 import glob
 import os
-import traceback
-
+import re
 import numpy as np
 import pandas as pd
 
 
-def aggregate(results_dir):
-    """Combine summary CSVs and compute mean/std statistics."""
-    print(f"Aggregating results from: {results_dir}")
+def parse_dir_name(dirname):
+    """Extract experimental condition from directory name.
 
+    Expected patterns:
+        global_simple_dim8, global_full_embonly_dim32, global_simple_baseline, etc.
+    """
+    info = {'scale': None, 'dgp': None, 'feature_config': None, 'embed_dim': None}
+
+    for scale in ('global', 'grid', 'counties'):
+        if dirname.startswith(scale):
+            info['scale'] = scale
+            break
+
+    if '_simple_' in dirname:
+        info['dgp'] = 'simple'
+    elif '_full_' in dirname:
+        info['dgp'] = 'full'
+
+    if 'embonly' in dirname:
+        info['feature_config'] = 'emb_only'
+    elif 'baseline' in dirname:
+        info['feature_config'] = 'baseline'
+    else:
+        info['feature_config'] = 'emb+coords'
+
+    dim_match = re.search(r'dim(\d+)', dirname)
+    if dim_match:
+        info['embed_dim'] = int(dim_match.group(1))
+    elif 'baseline' in dirname:
+        info['embed_dim'] = 0
+
+    return info
+
+
+def aggregate_single(results_dir):
+    """Combine summary CSVs from a single results directory."""
     summary_files = glob.glob(os.path.join(results_dir, "*_summary.csv"))
-    print(f"Found {len(summary_files)} summary files")
-
-    all_encoder_summaries = []
-    for summary_file in summary_files:
+    frames = []
+    for f in summary_files:
         try:
-            filename = os.path.basename(summary_file)
-            print(f"  Processing: {filename}")
-            df = pd.read_csv(summary_file)
-            all_encoder_summaries.append(df)
+            df = pd.read_csv(f)
+            frames.append(df)
         except Exception as e:
-            print(f"  Error processing {summary_file}: {e}")
-            traceback.print_exc()
+            print(f"  Error reading {f}: {e}")
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+    return None
 
-    if not all_encoder_summaries:
-        print("No summary files found to aggregate!")
+
+def aggregate_all(results_root, output_dir=None, prefix=None):
+    """Aggregate across all result directories under results_root."""
+    if output_dir is None:
+        output_dir = results_root
+
+    prefixes = tuple(prefix.split(',')) if prefix else ('global_', 'grid_', 'counties_')
+    result_dirs = sorted([
+        d for d in os.listdir(results_root)
+        if os.path.isdir(os.path.join(results_root, d))
+        and any(d.startswith(p) for p in prefixes)
+    ])
+    print(f"Found {len(result_dirs)} result directories")
+
+    all_frames = []
+    for dirname in result_dirs:
+        dirpath = os.path.join(results_root, dirname)
+        info = parse_dir_name(dirname)
+        print(f"  {dirname} -> {info}")
+
+        df = aggregate_single(dirpath)
+        if df is not None:
+            for k, v in info.items():
+                df[k] = v
+            all_frames.append(df)
+
+    if not all_frames:
+        print("No data found!")
         return
 
-    combined_df = pd.concat(all_encoder_summaries, ignore_index=True)
-    print(f"\nCombined {len(all_encoder_summaries)} files -> {combined_df.shape}")
+    combined = pd.concat(all_frames, ignore_index=True)
+    print(f"\nTotal rows: {len(combined)}")
 
-    # Save raw combined data
-    all_reps_file = os.path.join(results_dir, "all_encoders_all_repetitions.csv")
-    combined_df.to_csv(all_reps_file, index=False)
-    print(f"Saved: {all_reps_file}")
+    # Save raw
+    raw_file = os.path.join(output_dir, "combined_all_reps.csv")
+    combined.to_csv(raw_file, index=False)
+    print(f"Saved: {raw_file}")
 
-    # Compute mean/std across repetitions
-    grouping_cols = ['encoder', 'model', 'spatial_effect']
-    exclude_cols = grouping_cols + ['repetition']
-    metric_cols = [c for c in combined_df.columns if c not in exclude_cols]
+    # Summary stats
+    group_cols = ['scale', 'dgp', 'feature_config', 'embed_dim', 'encoder', 'model', 'spatial_effect']
+    group_cols = [c for c in group_cols if c in combined.columns]
+    exclude = set(group_cols + ['repetition'])
+    metric_cols = [c for c in combined.columns
+                   if c not in exclude and combined[c].dtype in ('float64', 'float32', 'int64')]
 
-    summary_stats = combined_df.groupby(grouping_cols)[metric_cols].agg(['mean', 'std', 'count'])
-    summary_stats.columns = ['_'.join(col).strip() for col in summary_stats.columns.values]
-    summary_stats.reset_index(inplace=True)
+    stats = combined.groupby(group_cols)[metric_cols].agg(['mean', 'std']).round(4)
+    stats.columns = ['_'.join(col) for col in stats.columns]
+    stats.reset_index(inplace=True)
 
-    summary_file = os.path.join(results_dir, "all_encoders_summary_stats.csv")
-    summary_stats.to_csv(summary_file, index=False)
-    print(f"Saved: {summary_file}")
-    print(f"\nUnique encoders: {summary_stats['encoder'].unique()}")
-    print(f"Unique models: {summary_stats['model'].unique()}")
+    stats_file = os.path.join(output_dir, "combined_summary_stats.csv")
+    stats.to_csv(stats_file, index=False)
+    print(f"Saved: {stats_file}")
+
+    # Comparison table: key metrics for smoothed SVCs
+    key_metrics = ['pearson_r_mean', 'ols_slope_mean', 'rmse_mean', 'r2_score_mean']
+    key_metrics = [m for m in key_metrics if m in stats.columns]
+
+    for effect in ('SVC_X1_Smooth', 'SVC_X2_Smooth'):
+        mask = stats['spatial_effect'] == effect
+        if mask.any():
+            pivot_cols = [c for c in group_cols if c != 'spatial_effect'] + key_metrics
+            pivot = stats.loc[mask, pivot_cols].sort_values(
+                ['dgp', 'feature_config', 'embed_dim', 'encoder'])
+            table_file = os.path.join(output_dir, f"comparison_{effect}.csv")
+            pivot.to_csv(table_file, index=False)
+            print(f"Saved: {table_file}")
+
+    # Quick console summary
+    print(f"\n{'='*80}")
+    print("QUICK SUMMARY (smoothed b1, mean Pearson r across reps)")
+    print(f"{'='*80}")
+    b1 = stats[stats['spatial_effect'] == 'SVC_X1_Smooth'].copy()
+    if not b1.empty and 'pearson_r_mean' in b1.columns:
+        pivot = b1.pivot_table(
+            index='encoder', columns=['dgp', 'feature_config', 'embed_dim'],
+            values='pearson_r_mean', aggfunc='first')
+        print(pivot.to_string())
+
+    print(f"\n{'='*80}")
+    print("QUICK SUMMARY (smoothed b2, mean Pearson r across reps)")
+    print(f"{'='*80}")
+    b2 = stats[stats['spatial_effect'] == 'SVC_X2_Smooth'].copy()
+    if not b2.empty and 'pearson_r_mean' in b2.columns:
+        pivot = b2.pivot_table(
+            index='encoder', columns=['dgp', 'feature_config', 'embed_dim'],
+            values='pearson_r_mean', aggfunc='first')
+        print(pivot.to_string())
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Aggregate experiment results')
-    parser.add_argument('--results_dir', type=str, required=True,
-                        help='Directory containing *_summary.csv files')
+    parser.add_argument('--results_dir', type=str, default=None,
+                        help='Single directory containing *_summary.csv files')
+    parser.add_argument('--results_root', type=str, default=None,
+                        help='Root directory containing multiple result dirs')
+    parser.add_argument('--prefix', type=str, default=None,
+                        help='Comma-separated prefixes to filter dirs, e.g. "global_simple_,global_full_"')
     args = parser.parse_args()
-    aggregate(args.results_dir)
+
+    if args.results_root:
+        aggregate_all(args.results_root, prefix=getattr(args, 'prefix', None))
+    elif args.results_dir:
+        df = aggregate_single(args.results_dir)
+        if df is not None:
+            out = os.path.join(args.results_dir, "all_encoders_all_repetitions.csv")
+            df.to_csv(out, index=False)
+            print(f"Saved: {out}")
+    else:
+        parser.error("Provide either --results_root or --results_dir")
