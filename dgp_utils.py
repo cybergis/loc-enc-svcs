@@ -279,7 +279,7 @@ class GlobalDGP:
 
         return {'b0': b0, 'b1': b1, 'b2': b2}
 
-    def generate_data(self, noise_std: float = 0.1) -> Tuple[pd.DataFrame, Tuple]:
+    def generate_data(self, noise_std: float = 0.1, simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple]:
         """Generate complete dataset."""
         np.random.seed(self.random_seed)
 
@@ -289,8 +289,12 @@ class GlobalDGP:
         X2 = np.random.uniform(-2, 2, self.n_points)
 
         coeffs = self.generate_mgwr_coefficients(lons, lats)
-        # DGP: y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + noise
-        y = coeffs['b0'] + (coeffs['b1'] * X1 + X1**2) + (coeffs['b2'] * X2 + 2 * X2)
+        if simple_dgp:
+            # Simple DGP: y = b0 + b1*X1 + b2*X2 + noise
+            y = coeffs['b0'] + coeffs['b1'] * X1 + coeffs['b2'] * X2
+        else:
+            # DGP: y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + noise
+            y = coeffs['b0'] + (coeffs['b1'] * X1 + X1**2) + (coeffs['b2'] * X2 + 2 * X2)
 
         if noise_std > 0:
             y += np.random.normal(0, noise_std, self.n_points)
@@ -306,7 +310,7 @@ class GlobalDGP:
 
 
 def create_global_data(n_points: int = 3000, noise_std: float = 0.1,
-                       random_seed: int = 222) -> Tuple[pd.DataFrame, Tuple]:
+                       random_seed: int = 222, simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple]:
     """Quick global data generation."""
     dgp = GlobalDGP(n_points=n_points, random_seed=random_seed)
-    return dgp.generate_data(noise_std=noise_std)
+    return dgp.generate_data(noise_std=noise_std, simple_dgp=simple_dgp)

@@ -506,7 +506,7 @@ def calculate_spatial_metrics(
             residuals = est_valid - true_valid
             
             if (
-                residuals.shape[0] == grid_size * grid_size
+                grid_size is not None and residuals.shape[0] == grid_size * grid_size
             ):  # Ensure it's for the full grid
                 w = weights.lat2W(
                     nrows=grid_size, ncols=grid_size, rook=False
