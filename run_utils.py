@@ -12,6 +12,10 @@ Everything else lives here.
 import argparse
 import time
 import traceback
+import warnings
+
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+warnings.filterwarnings("ignore", message="The total space of parameters")
 
 import numpy as np
 import pandas as pd
@@ -58,6 +62,8 @@ def build_base_parser(description):
                         help='Embedding dimension for spatial encoders (default: 4)')
     parser.add_argument('--simple_dgp', action='store_true', default=False,
                         help='Use simple DGP (y=b0+b1*X1+b2*X2) instead of complex Li&Peng DGP')
+    parser.add_argument('--no_coords', action='store_true', default=False,
+                        help='Exclude lon/lat from features (embeddings only)')
     return parser
 
 
@@ -109,13 +115,20 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
         return np.zeros((len(coords), 0))
 
 
-def prepare_features(X1, X2, coords, embeddings):
-    """Build ML feature DataFrame from covariates, coordinates, and embeddings."""
-    base = pd.DataFrame({'X1': X1, 'X2': X2, 'lon': coords[:, 0], 'lat': coords[:, 1]})
+def prepare_features(X1, X2, coords, embeddings, no_coords=False):
+    """Build ML feature DataFrame from covariates, coordinates, and embeddings.
+
+    Column order: [X1, X2, emb_0..emb_D, lon, lat]
+    Non-geo features (X1, X2) come first; all location-derived features
+    (embeddings + lon/lat) are grouped at the end for GeoShapley's g parameter.
+    If no_coords=True, lon/lat are excluded (embeddings only).
+    """
+    parts = [pd.DataFrame({'X1': X1, 'X2': X2})]
     if embeddings.shape[1] > 0:
-        emb_df = pd.DataFrame(embeddings, columns=[f'emb_{i}' for i in range(embeddings.shape[1])])
-        return pd.concat([base, emb_df], axis=1)
-    return base
+        parts.append(pd.DataFrame(embeddings, columns=[f'emb_{i}' for i in range(embeddings.shape[1])]))
+    if not no_coords:
+        parts.append(pd.DataFrame({'lon': coords[:, 0], 'lat': coords[:, 1]}))
+    return pd.concat(parts, axis=1)
 
 
 def train_ml_model(model_type, X_train, y_train, rep_seed):
@@ -175,20 +188,28 @@ def compute_moran_predictions(y_test, y_pred, coords_test, grid_size=None):
 def run_geoshapley(model, X_train_gs, X_for_geoshapley, feature_names, coords):
     """Run GeoShapley and return (shap_b0, shap_b1_raw, shap_b2_raw, shap_b1_smooth, shap_b2_smooth)."""
     def predict_func(X):
-        if isinstance(X, np.ndarray):
-            X = pd.DataFrame(X, columns=feature_names)
-        return model.predict(X[feature_names])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if isinstance(X, np.ndarray):
+                return model.predict(X)
+            return model.predict(X[feature_names].values)
 
-    # Subsample background to cap memory usage (standard SHAP practice)
+    # Count geo features: all emb_* columns + lon/lat (grouped at end of feature list)
+    n_emb = sum(1 for f in feature_names if f.startswith('emb_'))
+    n_coord = sum(1 for f in feature_names if f in ('lon', 'lat'))
+    n_geo = n_emb + n_coord
+
+    # Subsample background to cap memory (standard SHAP practice)
     max_bg = 200
     if len(X_train_gs) > max_bg:
         bg = X_train_gs.sample(n=max_bg, random_state=42).values
     else:
         bg = X_train_gs.values
     print(f"  Background: {len(bg)} points (from {len(X_train_gs)} train)")
+    print(f"  Geo features grouped: {n_geo} (emb_* + lon + lat)")
     print(f"  Explaining: {len(X_for_geoshapley)} total points")
 
-    explainer = GeoShapleyExplainer(predict_func, bg)
+    explainer = GeoShapleyExplainer(predict_func, bg, g=n_geo)
     rslt = explainer.explain(X_for_geoshapley, n_jobs=-1)
 
     x1_idx = feature_names.index('X1')
@@ -261,7 +282,8 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
 
         # [3] Feature prep
         print(f"\n[3/6] Preparing ML features...")
-        X_features = prepare_features(X1, X2, coords, embeddings)
+        X_features = prepare_features(X1, X2, coords, embeddings,
+                                       no_coords=getattr(args, 'no_coords', False))
         feature_names = list(X_features.columns)
 
         # [3.5] Split
