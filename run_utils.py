@@ -146,7 +146,7 @@ def train_ml_model(model_type, X_train, y_train, rep_seed):
             'solver': ['adam'],
             'alpha': [10**-x for x in range(4, 7)],
             'learning_rate_init': [0.001, 0.0005],
-            'max_iter': [2000],
+            'max_iter': [5000],
         }
         search = RandomizedSearchCV(
             MLPRegressor(random_state=rep_seed),
