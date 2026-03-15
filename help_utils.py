@@ -30,6 +30,19 @@ from utils import *  # noqa: E402
 
 SPA_EMBED_DIM = 4  # Default embedding dimension for spatial encoders
 
+# Encoders that normalize coordinates internally or convert to 3D — max_radius=1 is correct
+_EXTENT_NORMALIZED_ENCODERS = {'tile_ffn', 'wrap_ffn', 'rff', 'NeRF'}
+
+
+def _get_max_radius(encoder_type, extent):
+    """Encoders using raw coordinates need max_radius matching the data span."""
+    if encoder_type in _EXTENT_NORMALIZED_ENCODERS or encoder_type is None:
+        return 1
+    # Space2Vec and Sphere2Vec variants use raw coords with frequency scaling
+    x_span = extent[1] - extent[0]
+    y_span = extent[3] - extent[2]
+    return float(max(x_span, y_span))
+
 
 def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
     """
@@ -60,7 +73,7 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
         "spa_embed_dim": SPA_EMBED_DIM,
         "extent": extent,
         "freq": 16,
-        "max_radius": 1,
+        "max_radius": _get_max_radius(encoder_type, extent),
         "min_radius": 0.0001,
         "spa_f_act": "leakyrelu",
         "freq_init": "geometric",
@@ -100,7 +113,11 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu"):
 def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
                       device="cpu", n_epochs=500, lr=1e-3, random_seed=None):
     """
-    Train a location encoder jointly with a linear prediction head on the regression task.
+    Train a location encoder to predict y from coordinates alone.
+
+    Following TorchSpatial's approach, the encoder only receives coordinates
+    as input. The prediction head maps embeddings → y without access to
+    covariates, forcing the encoder to capture all spatial information.
 
     The encoder's NN() layers (MultiLayerFeedForwardNN) are trained via backprop.
     The PE() position encoding is fixed/deterministic and receives no gradient updates.
@@ -108,7 +125,7 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
 
     Args:
         coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
-        X1, X2:      np.ndarray [N], covariates — TRAIN SET ONLY
+        X1, X2:      np.ndarray [N], covariates — passed for API compat, not used in training
         y:            np.ndarray [N], response — TRAIN SET ONLY
         encoder_type: TorchSpatial encoder string (e.g. 'Space2Vec-theory', 'NeRF')
         extent:       (xmin, xmax, ymin, ymax)
@@ -131,7 +148,7 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         "spa_embed_dim": SPA_EMBED_DIM,
         "extent": extent,
         "freq": 16,
-        "max_radius": 1,
+        "max_radius": _get_max_radius(encoder_type, extent),
         "min_radius": 0.0001,
         "spa_f_act": "leakyrelu",
         "freq_init": "geometric",
@@ -160,16 +177,18 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         device=params["device"],
     ).to(device)
 
-    # Lightweight prediction head: [X1, X2, emb_0..emb_{d-1}] -> y
-    head = nn.Linear(2 + SPA_EMBED_DIM, 1).to(device)
+    # Prediction head: embeddings only → y (no covariates).
+    # Forces encoder to capture all spatial info in embeddings.
+    head = nn.Sequential(
+        nn.Linear(SPA_EMBED_DIM, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+    ).to(device)
 
     optimizer = optim.Adam(
         list(loc_enc.parameters()) + list(head.parameters()), lr=lr
     )
 
-    X_t = torch.tensor(
-        np.stack([X1, X2], axis=1), dtype=torch.float32
-    ).to(device)
     y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
 
     coords_enc = np.expand_dims(np.array(coords), axis=1)  # [N, 1, 2]
@@ -181,8 +200,7 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         emb = torch.squeeze(emb)           # [N, SPA_EMBED_DIM]
         if emb.ndim == 1:
             emb = emb.unsqueeze(0)
-        features = torch.cat([X_t, emb], dim=1)  # [N, 2 + SPA_EMBED_DIM]
-        y_pred = head(features)                   # [N, 1]
+        y_pred = head(emb)                        # [N, 1]
         loss = torch.nn.functional.mse_loss(y_pred, y_t)
         loss.backward()
         optimizer.step()

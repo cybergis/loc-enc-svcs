@@ -54,6 +54,8 @@ parser.add_argument('--encoder_epochs', type=int, default=500,
                     help='Training epochs for location encoder (default: 500)')
 parser.add_argument('--encoder_lr', type=float, default=1e-3,
                     help='Learning rate for encoder training (default: 0.001)')
+parser.add_argument('--simple_dgp', action='store_true', default=False,
+                    help='Use simple DGP (y=b0+b1*X1+b2*X2) instead of complex Li&Peng DGP')
 
 args = parser.parse_args()
 
@@ -78,8 +80,9 @@ for repetition in range(args.num_repetitions):
         # Generate data
         rep_seed = args.random_seed + repetition
         print(f"\n[1/6] Generating synthetic grid data (seed={rep_seed})...")
-        data, extent = create_grid_data(size=args.grid_size, coord_system='regional', 
-                                       noise_std=args.noise_std, random_seed=rep_seed)
+        data, extent = create_grid_data(size=args.grid_size, coord_system='regional',
+                                       noise_std=args.noise_std, random_seed=rep_seed,
+                                       simple_dgp=args.simple_dgp)
         
         X1 = data['X1'].values
         X2 = data['X2'].values
@@ -137,9 +140,10 @@ for repetition in range(args.num_repetitions):
                 else:
                     print("  Detected non-tensor embeddings. Stacking into dense array...")
                     embeddings = np.array(embeddings_result)
-                    if embeddings.ndim > 2:
-                        embeddings = np.squeeze(embeddings)
-                
+
+                if embeddings.ndim > 2:
+                    embeddings = embeddings.squeeze(axis=1)
+
                 if embeddings.ndim != 2:
                     raise ValueError(f"Embeddings are not 2D. Shape: {embeddings.shape}")
                 

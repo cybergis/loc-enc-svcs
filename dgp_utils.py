@@ -1,6 +1,9 @@
 """
 Data Generating Process (DGP) utilities for spatial experiments.
-Supports grid and county-level data with MGWR-style spatially-varying coefficients.
+Supports grid, county-level, and global data with MGWR-style spatially-varying
+coefficients plus global nonlinear effects, following the DGP structure in
+Li & Peng (2025, Geographical Analysis):
+    y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + epsilon
 """
 
 import numpy as np
@@ -99,20 +102,25 @@ class GridDGP:
             
             return {'b0': b0, 'b1': b1, 'b2': b2}
     
-    def generate_data(self, noise_std: float = 0.1) -> Tuple[pd.DataFrame, Tuple[float, float, float, float]]:
+    def generate_data(self, noise_std: float = 0.1, simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple[float, float, float, float]]:
         """Generate complete dataset."""
         np.random.seed(self.random_seed)
-        
+
         n_points = self.size * self.size
         X1 = np.random.uniform(-2, 2, n_points)
         X2 = np.random.uniform(-2, 2, n_points)
-        
+
         coeffs = self.generate_mgwr_coefficients()
-        y = coeffs['b0'] + coeffs['b1'] * X1 + coeffs['b2'] * X2
-        
+        if simple_dgp:
+            # Simple DGP: y = b0 + b1*X1 + b2*X2 + noise
+            y = coeffs['b0'] + coeffs['b1'] * X1 + coeffs['b2'] * X2
+        else:
+            # DGP: y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + noise
+            y = coeffs['b0'] + (coeffs['b1'] * X1 + X1**2) + (coeffs['b2'] * X2 + 2 * X2)
+
         if noise_std > 0:
             y += np.random.normal(0, noise_std, n_points)
-        
+
         coord_names = ['x_coord', 'y_coord'] if self.coord_system == 'grid' else ['lon', 'lat']
         
         df = pd.DataFrame({
@@ -195,16 +203,21 @@ class CountyDGP:
         
         return {'b0': b0, 'b1': b1, 'b2': b2}
     
-    def generate_data(self, noise_std: float = 0.1) -> Tuple[pd.DataFrame, Tuple[float, float, float, float], gpd.GeoDataFrame]:
+    def generate_data(self, noise_std: float = 0.1, simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple[float, float, float, float], gpd.GeoDataFrame]:
         """Generate complete dataset."""
         np.random.seed(self.random_seed)
-        
+
         X1 = np.random.uniform(-2, 2, self.n_counties)
         X2 = np.random.uniform(-2, 2, self.n_counties)
-        
+
         coeffs = self.generate_mgwr_coefficients()
-        y = coeffs['b0'] + coeffs['b1'] * X1 + coeffs['b2'] * X2
-        
+        if simple_dgp:
+            # Simple DGP: y = b0 + b1*X1 + b2*X2 + noise
+            y = coeffs['b0'] + coeffs['b1'] * X1 + coeffs['b2'] * X2
+        else:
+            # DGP: y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + noise
+            y = coeffs['b0'] + (coeffs['b1'] * X1 + X1**2) + (coeffs['b2'] * X2 + 2 * X2)
+
         if noise_std > 0:
             y += np.random.normal(0, noise_std, self.n_counties)
         
@@ -227,15 +240,73 @@ class CountyDGP:
 
 
 # Convenience functions
-def create_grid_data(size: int = 25, coord_system: str = 'regional', 
-                    noise_std: float = 0.1, random_seed: int = 222) -> Tuple[pd.DataFrame, Tuple]:
+def create_grid_data(size: int = 25, coord_system: str = 'regional',
+                    noise_std: float = 0.1, random_seed: int = 222,
+                    simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple]:
     """Quick grid data generation."""
     dgp = GridDGP(size=size, coord_system=coord_system, random_seed=random_seed)
-    return dgp.generate_data(noise_std=noise_std)
+    return dgp.generate_data(noise_std=noise_std, simple_dgp=simple_dgp)
 
 
 def create_county_data(shapefile_path: Optional[str] = None, noise_std: float = 0.1,
-                       random_seed: int = 222) -> Tuple[pd.DataFrame, Tuple, gpd.GeoDataFrame]:
+                       random_seed: int = 222, simple_dgp: bool = False) -> Tuple[pd.DataFrame, Tuple, gpd.GeoDataFrame]:
     """Quick county data generation."""
     dgp = CountyDGP(shapefile_path=shapefile_path, random_seed=random_seed)
+    return dgp.generate_data(noise_std=noise_std, simple_dgp=simple_dgp)
+
+
+class GlobalDGP:
+    """Generate synthetic data for global-scale experiments."""
+
+    def __init__(self, n_points: int = 3000, random_seed: int = 222):
+        self.n_points = n_points
+        self.random_seed = random_seed
+        np.random.seed(random_seed)
+        self.extent = (-180.0, 180.0, -90.0, 90.0)
+
+    def generate_mgwr_coefficients(self, lons: np.ndarray, lats: np.ndarray) -> Dict[str, np.ndarray]:
+        """Generate MGWR-style coefficients for global coordinates."""
+        lon_norm = (lons + 180) / 360.0   # [0, 1]
+        lat_norm = (lats + 90) / 180.0    # [0, 1]
+
+        b0 = 1.5 + 3.5 * (1 - ((lon_norm - 0.5)**2 + (lat_norm - 0.5)**2) / 0.5)
+        b0 = np.clip(b0, 0.5, 5.0)
+
+        b1 = 1 + 4 * (lon_norm + lat_norm) / 2
+
+        b2 = 1.5 + 3 * ((1 - lon_norm + lat_norm) / 2) + \
+             0.5 * np.sin(4 * np.pi * lon_norm) * np.cos(4 * np.pi * lat_norm)
+
+        return {'b0': b0, 'b1': b1, 'b2': b2}
+
+    def generate_data(self, noise_std: float = 0.1) -> Tuple[pd.DataFrame, Tuple]:
+        """Generate complete dataset."""
+        np.random.seed(self.random_seed)
+
+        lons = np.random.uniform(-180, 180, self.n_points)
+        lats = np.random.uniform(-90, 90, self.n_points)
+        X1 = np.random.uniform(-2, 2, self.n_points)
+        X2 = np.random.uniform(-2, 2, self.n_points)
+
+        coeffs = self.generate_mgwr_coefficients(lons, lats)
+        # DGP: y = b0 + (b1*X1 + X1^2) + (b2*X2 + 2*X2) + noise
+        y = coeffs['b0'] + (coeffs['b1'] * X1 + X1**2) + (coeffs['b2'] * X2 + 2 * X2)
+
+        if noise_std > 0:
+            y += np.random.normal(0, noise_std, self.n_points)
+
+        df = pd.DataFrame({
+            'X1': X1, 'X2': X2,
+            'lon': lons, 'lat': lats,
+            'y': y,
+            'b0': coeffs['b0'], 'b1': coeffs['b1'], 'b2': coeffs['b2']
+        })
+
+        return df, self.extent
+
+
+def create_global_data(n_points: int = 3000, noise_std: float = 0.1,
+                       random_seed: int = 222) -> Tuple[pd.DataFrame, Tuple]:
+    """Quick global data generation."""
+    dgp = GlobalDGP(n_points=n_points, random_seed=random_seed)
     return dgp.generate_data(noise_std=noise_std)
