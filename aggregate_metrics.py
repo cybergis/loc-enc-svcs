@@ -213,7 +213,7 @@ def aggregate_all(results_root, output_dir=None, prefix=None):
     print(f"Saved: {raw_file}")
 
     # Summary stats
-    group_cols = ['scale', 'dgp', 'feature_config', 'embed_dim', 'encoder', 'model', 'spatial_effect']
+    group_cols = ['scale', 'dgp', 'feature_config', 'embed_dim', 'encoder_trained', 'encoder', 'model', 'spatial_effect']
     group_cols = [c for c in group_cols if c in combined.columns]
     exclude = set(group_cols + ['repetition'])
     metric_cols = [c for c in combined.columns

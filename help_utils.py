@@ -115,37 +115,9 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu",
     return loc_embeds
 
 
-def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
-                      device="cpu", n_epochs=500, lr=1e-3, random_seed=None,
-                      embed_dim=None, f_act="silu"):
-    """
-    Train a location encoder to predict y from coordinates alone.
-
-    Following TorchSpatial's approach: single linear prediction head (no bias),
-    LR decay of 0.98/epoch, and the encoder only sees coordinates.
-
-    Args:
-        coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
-        X1, X2:      np.ndarray [N], covariates — passed for API compat, not used
-        y:            np.ndarray [N], response — TRAIN SET ONLY
-        encoder_type: TorchSpatial encoder string (e.g. 'Space2Vec-theory')
-        extent:       (xmin, xmax, ymin, ymax)
-        device:       'cpu' or 'cuda:0'
-        n_epochs:     gradient steps (default 500)
-        lr:           initial Adam learning rate (default 1e-3)
-        random_seed:  torch manual seed for reproducibility
-        embed_dim:    embedding dimension. Defaults to SPA_EMBED_DIM.
-
-    Returns:
-        loc_enc: trained nn.Module in eval() mode
-    """
+def _build_encoder(encoder_type, extent, dim, f_act, device):
+    """Build a TorchSpatial location encoder with standard parameters."""
     import torch.nn as nn
-    import torch.optim as optim
-
-    dim = embed_dim if embed_dim is not None else SPA_EMBED_DIM
-
-    if random_seed is not None:
-        torch.manual_seed(random_seed)
 
     params = {
         "spa_enc_type": encoder_type,
@@ -165,7 +137,7 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         "device": device,
     }
 
-    loc_enc = get_spa_encoder(
+    return get_spa_encoder(
         train_locs=[],
         params=params,
         spa_enc_type=params["spa_enc_type"],
@@ -181,27 +153,124 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
         device=params["device"],
     ).to(device)
 
-    # Single linear head matching TorchSpatial's FCNet: Linear(embed_dim→1, no bias)
-    head = nn.Linear(dim, 1, bias=False).to(device)
-    nn.init.xavier_uniform_(head.weight)
 
-    optimizer = optim.Adam(
-        list(loc_enc.parameters()) + list(head.parameters()), lr=lr
-    )
+def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
+                      device="cpu", n_epochs=500, lr=1e-3, random_seed=None,
+                      embed_dim=None, f_act="silu"):
+    """
+    Train a location encoder using spatial contrastive learning.
+
+    Nearby coordinates get similar embeddings, distant ones get pushed apart.
+    This preserves spatial structure without overfitting to y.
+
+    Each epoch: sample anchor points, create positive pairs (nearby) and
+    negative pairs (distant), optimize InfoNCE contrastive loss.
+
+    Args:
+        coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
+        X1, X2:      np.ndarray [N], covariates — not used (API compat)
+        y:            np.ndarray [N], response — not used (self-supervised)
+        encoder_type: TorchSpatial encoder string
+        extent:       (xmin, xmax, ymin, ymax)
+        device:       'cpu' or 'cuda:0'
+        n_epochs:     gradient steps (default 500)
+        lr:           initial Adam learning rate (default 1e-3)
+        random_seed:  torch manual seed for reproducibility
+        embed_dim:    embedding dimension. Defaults to SPA_EMBED_DIM.
+
+    Returns:
+        loc_enc: trained nn.Module in eval() mode
+    """
+    import torch.nn as nn
+    import torch.optim as optim
+
+    dim = embed_dim if embed_dim is not None else SPA_EMBED_DIM
+
+    if random_seed is not None:
+        torch.manual_seed(random_seed)
+        np.random.seed(random_seed)
+
+    loc_enc = _build_encoder(encoder_type, extent, dim, f_act, device)
+
+    optimizer = optim.Adam(loc_enc.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
 
-    y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
-    coords_enc = np.expand_dims(np.array(coords), axis=1)  # [N, 1, 2]
+    # Precompute pairwise distances for positive/negative sampling
+    coords_arr = np.array(coords)
+    lon_min, lon_max, lat_min, lat_max = extent
+    coords_norm = np.column_stack([
+        (coords_arr[:, 0] - lon_min) / (lon_max - lon_min),
+        (coords_arr[:, 1] - lat_min) / (lat_max - lat_min),
+    ])
+
+    # Positive threshold: 10th percentile of pairwise distances
+    # Negative threshold: 50th percentile
+    from scipy.spatial.distance import pdist, squareform
+    N = len(coords_norm)
+    if N > 1000:
+        # Subsample for distance computation
+        idx_sub = np.random.choice(N, 1000, replace=False)
+        dists_sub = pdist(coords_norm[idx_sub])
+        pos_thresh = np.percentile(dists_sub, 10)
+        neg_thresh = np.percentile(dists_sub, 50)
+    else:
+        dists_all = pdist(coords_norm)
+        pos_thresh = np.percentile(dists_all, 10)
+        neg_thresh = np.percentile(dists_all, 50)
+
+    coords_enc = np.expand_dims(coords_arr, axis=1)  # [N, 1, 2]
+    batch_size = min(256, N)
+    temperature = 0.1
 
     loc_enc.train()
-    for _ in range(n_epochs):
+    for epoch in range(n_epochs):
         optimizer.zero_grad()
-        emb = loc_enc(coords_enc)
-        emb = torch.squeeze(emb)
-        if emb.ndim == 1:
-            emb = emb.unsqueeze(0)
-        y_pred = head(emb)
-        loss = torch.nn.functional.mse_loss(y_pred, y_t)
+
+        # Sample anchor batch
+        anchor_idx = np.random.choice(N, batch_size, replace=False)
+        anchor_coords = coords_norm[anchor_idx]
+
+        # For each anchor, find a positive (nearby) and negative (distant)
+        pos_idx = np.zeros(batch_size, dtype=int)
+        neg_idx = np.zeros(batch_size, dtype=int)
+        for i, ai in enumerate(anchor_idx):
+            dists_i = np.linalg.norm(coords_norm - anchor_coords[i], axis=1)
+            # Positive: random nearby point (exclude self)
+            pos_mask = (dists_i < pos_thresh) & (dists_i > 0)
+            if pos_mask.sum() > 0:
+                pos_idx[i] = np.random.choice(np.where(pos_mask)[0])
+            else:
+                pos_idx[i] = np.argpartition(dists_i, 2)[1]  # nearest neighbor
+            # Negative: random distant point
+            neg_mask = dists_i > neg_thresh
+            if neg_mask.sum() > 0:
+                neg_idx[i] = np.random.choice(np.where(neg_mask)[0])
+            else:
+                neg_idx[i] = np.argmax(dists_i)
+
+        # Get embeddings
+        all_idx = np.concatenate([anchor_idx, pos_idx, neg_idx])
+        emb_all = loc_enc(coords_enc[all_idx])
+        emb_all = torch.squeeze(emb_all)
+        if emb_all.ndim == 1:
+            emb_all = emb_all.unsqueeze(0)
+
+        emb_anchor = emb_all[:batch_size]
+        emb_pos = emb_all[batch_size:2*batch_size]
+        emb_neg = emb_all[2*batch_size:]
+
+        # Normalize embeddings for cosine similarity
+        emb_anchor = nn.functional.normalize(emb_anchor, dim=1)
+        emb_pos = nn.functional.normalize(emb_pos, dim=1)
+        emb_neg = nn.functional.normalize(emb_neg, dim=1)
+
+        # InfoNCE loss: push anchors toward positives, away from negatives
+        pos_sim = (emb_anchor * emb_pos).sum(dim=1) / temperature
+        neg_sim = (emb_anchor * emb_neg).sum(dim=1) / temperature
+        logits = torch.stack([pos_sim, neg_sim], dim=1)
+        labels = torch.zeros(batch_size, dtype=torch.long, device=device)
+        loss = nn.functional.cross_entropy(logits, labels)
+
         loss.backward()
         optimizer.step()
         scheduler.step()

@@ -123,8 +123,11 @@ def prepare_features(X1, X2, coords, embeddings, extent, no_coords=False):
     (embeddings + lon/lat) are grouped at the end for GeoShapley's g parameter.
     If no_coords=True, lon/lat are excluded (embeddings only).
 
-    Coordinates are normalized to [0, 1] using extent, matching the DGP's
-    coordinate system for generating true SVCs.
+    Coordinates are normalized to [0, 1] for the MLP (standard preprocessing).
+    Location encoders receive raw coords and handle normalization internally
+    (e.g. projection to unit sphere). Even with normalized coords, the MLP
+    cannot resolve the dateline discontinuity (0.997 ≠ 0.003 for ±179°),
+    while spherical encoders handle this natively.
     """
     parts = [pd.DataFrame({'X1': X1, 'X2': X2})]
     if embeddings.shape[1] > 0:

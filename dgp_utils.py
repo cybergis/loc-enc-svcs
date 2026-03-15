@@ -268,17 +268,42 @@ class GlobalDGP:
         self.extent = (-180.0, 180.0, -90.0, 90.0)
 
     def generate_mgwr_coefficients(self, lons: np.ndarray, lats: np.ndarray) -> Dict[str, np.ndarray]:
-        """Generate MGWR-style coefficients for global coordinates."""
-        lon_norm = (lons + 180) / 360.0   # [0, 1]
-        lat_norm = (lats + 90) / 180.0    # [0, 1]
+        """Generate spatially-varying coefficients using spherical geometry.
 
-        b0 = 1.5 + 3.5 * (1 - ((lon_norm - 0.5)**2 + (lat_norm - 0.5)**2) / 0.5)
+        Uses 3D Cartesian coordinates on the unit sphere so that:
+        - Patterns are continuous across the dateline (-180/180)
+        - Poles are handled naturally
+        - An MLP with raw lon/lat cannot easily learn these patterns
+          because of the coordinate discontinuity, while location encoders
+          that project to 3D (Sphere2Vec, NeRF) handle this natively.
+        """
+        # Convert to radians and project to unit sphere
+        lon_rad = np.deg2rad(lons)
+        lat_rad = np.deg2rad(lats)
+        x = np.cos(lat_rad) * np.cos(lon_rad)
+        y = np.cos(lat_rad) * np.sin(lon_rad)
+        z = np.sin(lat_rad)
+
+        # b0: Distance from a reference point (Tokyo: 139.7°E, 35.7°N)
+        # Uses great-circle-like metric via dot product on unit sphere
+        ref_lon, ref_lat = np.deg2rad(139.7), np.deg2rad(35.7)
+        ref_x = np.cos(ref_lat) * np.cos(ref_lon)
+        ref_y = np.cos(ref_lat) * np.sin(ref_lon)
+        ref_z = np.sin(ref_lat)
+        dot = np.clip(x * ref_x + y * ref_y + z * ref_z, -1, 1)
+        gc_dist = np.arccos(dot) / np.pi  # normalized to [0, 1]
+        b0 = 1.0 + 4.0 * (1.0 - gc_dist)
         b0 = np.clip(b0, 0.5, 5.0)
 
-        b1 = 1 + 4 * (lon_norm + lat_norm) / 2
+        # b1: Spherical harmonic-like pattern using 3D coords
+        # Continuous across dateline, varies with both lon and lat
+        b1 = 1.0 + 2.0 * (x + 1) / 2.0 + 2.0 * (z + 1) / 2.0
 
-        b2 = 1.5 + 3 * ((1 - lon_norm + lat_norm) / 2) + \
-             0.5 * np.sin(4 * np.pi * lon_norm) * np.cos(4 * np.pi * lat_norm)
+        # b2: Multi-scale oscillation on the sphere
+        # High-frequency component that wraps smoothly around the globe
+        b2 = 1.5 + 1.5 * y + \
+             0.8 * np.sin(3 * lon_rad) * np.cos(2 * lat_rad) + \
+             0.5 * np.sin(5 * lon_rad + 2 * lat_rad)
 
         return {'b0': b0, 'b1': b1, 'b2': b2}
 
