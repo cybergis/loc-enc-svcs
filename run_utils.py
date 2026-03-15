@@ -179,10 +179,16 @@ def run_geoshapley(model, X_train_gs, X_for_geoshapley, feature_names, coords):
             X = pd.DataFrame(X, columns=feature_names)
         return model.predict(X[feature_names])
 
-    print(f"  Background: {len(X_train_gs)} train points")
+    # Subsample background to cap memory usage (standard SHAP practice)
+    max_bg = 200
+    if len(X_train_gs) > max_bg:
+        bg = X_train_gs.sample(n=max_bg, random_state=42).values
+    else:
+        bg = X_train_gs.values
+    print(f"  Background: {len(bg)} points (from {len(X_train_gs)} train)")
     print(f"  Explaining: {len(X_for_geoshapley)} total points")
 
-    explainer = GeoShapleyExplainer(predict_func, X_train_gs.values)
+    explainer = GeoShapleyExplainer(predict_func, bg)
     rslt = explainer.explain(X_for_geoshapley, n_jobs=-1)
 
     x1_idx = feature_names.index('X1')

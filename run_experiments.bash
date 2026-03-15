@@ -2,9 +2,9 @@
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
 #SBATCH --time=20:00:00
-#SBATCH --mem=64G
+#SBATCH --mem=16G
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=8
 #SBATCH --array=0-11
 
 # Unified experiment runner for grid, counties, and global experiments
