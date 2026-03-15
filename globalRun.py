@@ -11,7 +11,7 @@ from run_utils import build_base_parser, run_experiment_loop
 from dgp_utils import create_global_data
 
 parser = build_base_parser('Global location encoder experiments')
-parser.add_argument('--n_points', type=int, default=3000)
+parser.add_argument('--n_points', type=int, default=10000)
 args = parser.parse_args()
 
 run_experiment_loop(

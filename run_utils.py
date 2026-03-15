@@ -115,19 +115,25 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
         return np.zeros((len(coords), 0))
 
 
-def prepare_features(X1, X2, coords, embeddings, no_coords=False):
+def prepare_features(X1, X2, coords, embeddings, extent, no_coords=False):
     """Build ML feature DataFrame from covariates, coordinates, and embeddings.
 
     Column order: [X1, X2, emb_0..emb_D, lon, lat]
     Non-geo features (X1, X2) come first; all location-derived features
     (embeddings + lon/lat) are grouped at the end for GeoShapley's g parameter.
     If no_coords=True, lon/lat are excluded (embeddings only).
+
+    Coordinates are normalized to [0, 1] using extent, matching the DGP's
+    coordinate system for generating true SVCs.
     """
     parts = [pd.DataFrame({'X1': X1, 'X2': X2})]
     if embeddings.shape[1] > 0:
         parts.append(pd.DataFrame(embeddings, columns=[f'emb_{i}' for i in range(embeddings.shape[1])]))
     if not no_coords:
-        parts.append(pd.DataFrame({'lon': coords[:, 0], 'lat': coords[:, 1]}))
+        lon_min, lon_max, lat_min, lat_max = extent
+        lon_norm = (coords[:, 0] - lon_min) / (lon_max - lon_min)
+        lat_norm = (coords[:, 1] - lat_min) / (lat_max - lat_min)
+        parts.append(pd.DataFrame({'lon': lon_norm, 'lat': lat_norm}))
     return pd.concat(parts, axis=1)
 
 
@@ -282,7 +288,7 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
 
         # [3] Feature prep
         print(f"\n[3/6] Preparing ML features...")
-        X_features = prepare_features(X1, X2, coords, embeddings,
+        X_features = prepare_features(X1, X2, coords, embeddings, extent,
                                        no_coords=getattr(args, 'no_coords', False))
         feature_names = list(X_features.columns)
 
