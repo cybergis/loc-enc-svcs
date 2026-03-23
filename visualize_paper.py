@@ -58,17 +58,13 @@ def load_data(results_root):
     return stats, tests
 
 
-def _aspect_for_lat(lat_series):
-    """Return Mercator-corrected data aspect ratio for a given latitude band."""
-    mean_lat = float(np.mean(lat_series))
-    return 1.0 / np.cos(np.radians(mean_lat))
-
-
-def _scatter_map(ax, lon, lat, vals, cmap, norm, s, **kw):
-    """Scatter plot with latitude-corrected aspect ratio."""
+def _scatter_map(ax, lon, lat, vals, cmap, norm, s, fix_aspect=False, **kw):
+    """Scatter plot. Optionally applies Mercator-corrected aspect (for county/grid)."""
     sc = ax.scatter(lon, lat, c=vals, cmap=cmap, norm=norm,
                     s=s, linewidths=0, rasterized=True, **kw)
-    ax.set_aspect(_aspect_for_lat(lat))
+    if fix_aspect:
+        mean_lat = float(np.mean(np.asarray(lat)))
+        ax.set_aspect(1.0 / np.cos(np.radians(mean_lat)))
     ax.set_xticks([]); ax.set_yticks([])
     return sc
 
@@ -124,7 +120,8 @@ def fig_ground_truth(results_root, output_dir):
 
             df = dfs[scale]
             row_sc = _scatter_map(ax, df['lon'], df['lat'], df[coeff],
-                                  cmap='coolwarm', norm=norm, s=dot_s[scale])
+                                  cmap='coolwarm', norm=norm, s=dot_s[scale],
+                                  fix_aspect=(scale != 'global'))
 
             if row == 0:
                 ax.set_title(SCALE_LABELS[scale], fontweight='bold', fontsize=11)
@@ -136,7 +133,8 @@ def fig_ground_truth(results_root, output_dir):
         if row_sc is not None:
             cbar_ax = fig.add_subplot(gs[row, 3])
             cb = plt.colorbar(row_sc, cax=cbar_ax)
-            cb.set_ticks(np.linspace(vmin, vmax, 5))
+            ticks = np.linspace(vmin, vmax, 5)
+            cb.set_ticks(np.round(ticks, 1))
             cb.ax.tick_params(labelsize=7)
 
     fig.suptitle('True Spatially-Varying Coefficients', fontsize=12,
@@ -237,30 +235,11 @@ def fig_main_heatmap(stats, tests, output_dir):
         ax.axhline(3, color='white', linewidth=3)
         ax.axhline(9, color='white', linewidth=3)
 
-        # Tier indicator: thin colored strip on the left edge of each encoder group
-        for i, enc in enumerate(ENCODER_ORDER):
-            tier = TIER_LABELS[enc]
-            ax.add_patch(mpatches.Rectangle((-0.35, i + 0.05), 0.30, 0.90,
-                                            facecolor=TIER_COLORS[tier],
-                                            edgecolor=TIER_DARK[tier],
-                                            linewidth=0.5,
-                                            clip_on=False,
-                                            transform=ax.transData))
-
         # Keep all tick labels black
         ax.set_yticklabels(ax.get_yticklabels(), color='black', fontsize=8)
         ax.set_title(title, fontsize=10, fontweight='bold', pad=10)
         ax.set_xlabel(''); ax.set_ylabel('')
         ax.tick_params(axis='x', labelsize=7.5)
-
-    # Tier legend in upper-left of left panel
-    tier_patches = [
-        mpatches.Patch(facecolor=TIER_COLORS[t], edgecolor=TIER_DARK[t],
-                       linewidth=0.8, label=f'Tier {t}')
-        for t in [1, 2, 3]
-    ]
-    axes[0].legend(handles=tier_patches, loc='upper left', fontsize=7.5,
-                   framealpha=0.85, title='Encoder tier', title_fontsize=7.5)
 
     fig.suptitle(r'$\beta_2$ SVC Recovery (Multi-Scale Oscillation)',
                  fontsize=12, fontweight='bold')
@@ -315,51 +294,50 @@ def fig_spatial_global(results_root, output_dir):
     max_err = np.percentile(np.abs(errs_all), 98)
     norm_e  = TwoSlopeNorm(vmin=-max_err, vcenter=0, vmax=max_err)
 
-    # Layout: 2 rows × (n_panels + 1 cbar col each)
-    fig = plt.figure(figsize=(12, 5.5))
-    gs = gridspec.GridSpec(2, n_panels + 1,
-                           width_ratios=[1]*n_panels + [0.04],
-                           hspace=0.10, wspace=0.06,
+    # Layout: truth spans both rows in col 0; cols 1-4 = surface (row 0) + error (row 1)
+    n_enc_panels = n_panels - 1
+    fig = plt.figure(figsize=(12, 5.0))
+    gs = gridspec.GridSpec(2, n_enc_panels + 2,
+                           width_ratios=[1] * (n_enc_panels + 1) + [0.04],
+                           hspace=0.08, wspace=0.06,
                            left=0.03, right=0.95, top=0.88, bottom=0.03)
 
-    im0_last = im1_last = None
-    for col_idx, (label, subdir, _) in enumerate(panels):
-        ax0 = fig.add_subplot(gs[0, col_idx])
-        ax1 = fig.add_subplot(gs[1, col_idx])
+    lon = truth_df['lon'].values
+    lat = truth_df['lat'].values
 
-        lon = truth_df['lon'].values
-        lat = truth_df['lat'].values
+    # Truth: spans both rows, same colormap as estimated surfaces
+    ax_truth = fig.add_subplot(gs[:, 0])
+    im_truth = _scatter_map(ax_truth, lon, lat, truth_df['b2_true'].values,
+                            cmap='coolwarm', norm=norm_c, s=1.0)
+    ax_truth.set_title('Truth', fontsize=7.5, pad=3)
 
-        # Row 0: β₂ surface
-        vals0 = truth_df['b2_true'].values if col_idx == 0 \
-                else data_list[col_idx]['b2_smooth_estimated'].values
-        im0 = _scatter_map(ax0, lon, lat, vals0,
+    im0_last = im_truth
+    im1_last = None
+    for idx, (label, subdir, _) in enumerate(panels[1:], start=1):
+        ax0 = fig.add_subplot(gs[0, idx])
+        ax1 = fig.add_subplot(gs[1, idx])
+
+        im0 = _scatter_map(ax0, lon, lat, data_list[idx]['b2_smooth_estimated'].values,
                            cmap='coolwarm', norm=norm_c, s=1.0)
         im0_last = im0
         ax0.set_title(label, fontsize=7.5, pad=3)
-        if col_idx == 0:
-            ax0.set_ylabel(r'$\hat{\beta}_2$', fontsize=8)
 
-        # Row 1: error map
-        if col_idx == 0:
-            ax1.axis('off')
-        else:
-            err = data_list[col_idx]['b2_smooth_estimated'].values - truth_df['b2_true'].values
-            im1 = _scatter_map(ax1, lon, lat, err,
-                               cmap='RdBu_r', norm=norm_e, s=1.0)
-            im1_last = im1
-            if col_idx == 1:
-                ax1.set_ylabel('Error', fontsize=8)
+        err = data_list[idx]['b2_smooth_estimated'].values - truth_df['b2_true'].values
+        im1 = _scatter_map(ax1, lon, lat, err,
+                           cmap='RdBu_r', norm=norm_e, s=1.0)
+        im1_last = im1
+        if idx == 1:
+            ax1.set_ylabel('Error', fontsize=8)
 
     # Colorbars
-    cbar_ax0 = fig.add_subplot(gs[0, n_panels])
+    cbar_ax0 = fig.add_subplot(gs[0, n_enc_panels + 1])
     cb0 = plt.colorbar(im0_last, cax=cbar_ax0, label=r'$\beta_2$')
-    cb0.set_ticks(np.linspace(vmin_c, vmax_c, 5))
+    cb0.set_ticks(np.round(np.linspace(vmin_c, vmax_c, 5), 1))
     cb0.ax.tick_params(labelsize=7); cb0.ax.yaxis.label.set_size(8)
 
-    cbar_ax1 = fig.add_subplot(gs[1, n_panels])
+    cbar_ax1 = fig.add_subplot(gs[1, n_enc_panels + 1])
     cb1 = plt.colorbar(im1_last, cax=cbar_ax1, label='Error')
-    cb1.set_ticks([-max_err, -max_err/2, 0, max_err/2, max_err])
+    cb1.set_ticks(np.round([-max_err, -max_err/2, 0, max_err/2, max_err], 1))
     cb1.ax.tick_params(labelsize=7); cb1.ax.yaxis.label.set_size(8)
 
     fig.suptitle(r'Global $\beta_2$ Recovery: Representative Encoders (rep 0)',
