@@ -138,10 +138,11 @@ def fig_ground_truth(results_root, output_dir):
         vlims[coeff] = (np.percentile(all_vals, 2), np.percentile(all_vals, 98))
 
     # Layout: 3 rows × (3 panels + narrow colorbar col)
+    # left margin widened to 0.12 to give room for row labels
     fig = plt.figure(figsize=(9.0, 7.5))
     gs = gridspec.GridSpec(3, 4, width_ratios=[1, 1, 1, 0.05],
                            hspace=0.45, wspace=0.25,
-                           left=0.07, right=0.95, top=0.90, bottom=0.06)
+                           left=0.12, right=0.95, top=0.90, bottom=0.06)
 
     for row, (coeff, label) in enumerate(coeffs):
         vmin, vmax = vlims[coeff]
@@ -165,8 +166,6 @@ def fig_ground_truth(results_root, output_dir):
 
             if row == 0:
                 ax.set_title(SCALE_LABELS[scale], fontweight='bold', fontsize=11)
-            if col == 0:
-                ax.set_ylabel(label, fontsize=9)
             if not proj:
                 sns.despine(ax=ax, left=True, bottom=True)
 
@@ -177,6 +176,14 @@ def fig_ground_truth(results_root, output_dir):
             ticks = np.linspace(vmin, vmax, 5)
             cb.set_ticks(np.round(ticks, 1))
             cb.ax.tick_params(labelsize=7)
+
+    # Row labels on the left (fig.text is more reliable than set_ylabel on GeoAxes)
+    row_labels = [r'$\beta_0$ (Intercept)',
+                  r'$\beta_1$ (Smooth gradient)',
+                  r'$\beta_2$ (Multi-scale oscillation)']
+    row_y = [0.78, 0.50, 0.22]   # approximate vertical centres of each row
+    for lbl, y in zip(row_labels, row_y):
+        fig.text(0.02, y, lbl, va='center', ha='left', fontsize=9, rotation=90)
 
     fig.suptitle('True Spatially-Varying Coefficients', fontsize=12,
                  fontweight='bold', y=0.95)
