@@ -335,38 +335,28 @@ def fig_spatial_global(results_root, output_dir):
     max_err = np.percentile(np.abs(errs_all), 98)
     norm_e  = TwoSlopeNorm(vmin=-max_err, vcenter=0, vmax=max_err)
 
-    # Layout: 3 rows (truth / estimated / errors) × 4 encoder cols + 1 cbar col
-    n_enc = n_panels - 1  # 4 encoder panels
-    fig = plt.figure(figsize=(11, 7.5))
-    gs = gridspec.GridSpec(3, n_enc + 1,
+    # Layout: 2 rows (estimated / errors) × 4 encoder cols + 1 cbar col
+    n_enc = n_panels - 1  # 4 encoder panels (no truth panel here)
+    fig = plt.figure(figsize=(11, 5.0))
+    gs = gridspec.GridSpec(2, n_enc + 1,
                            width_ratios=[1] * n_enc + [0.04],
-                           height_ratios=[1, 1, 1],
-                           hspace=0.10, wspace=0.06,
-                           left=0.03, right=0.96, top=0.92, bottom=0.03)
+                           hspace=0.08, wspace=0.06,
+                           left=0.03, right=0.96, top=0.90, bottom=0.03)
 
     lon = truth_df['lon'].values
     lat = truth_df['lat'].values
     mol = ccrs.Mollweide()
 
-    # Row 0: Truth spanning all encoder columns
-    ax_truth = fig.add_subplot(gs[0, :n_enc], projection=mol)
-    im_truth = _scatter_map(ax_truth, lon, lat, truth_df['b2_true'].values,
-                            cmap='coolwarm', norm=norm_c, s=1.5, transform=_PLATE)
-    _add_geo_features(ax_truth, 'global')
-    ax_truth.set_title('Truth', fontsize=8, pad=3)
-
-    # Row 1: estimated surfaces; Row 2: error maps
-    im0_last = im_truth
-    im1_last = None
+    im0_last = im1_last = None
     for idx, (label, subdir, _) in enumerate(panels[1:]):
-        ax0 = fig.add_subplot(gs[1, idx], projection=mol)
+        ax0 = fig.add_subplot(gs[0, idx], projection=mol)
         im0 = _scatter_map(ax0, lon, lat, data_list[idx + 1]['b2_smooth_estimated'].values,
                            cmap='coolwarm', norm=norm_c, s=1.0, transform=_PLATE)
         _add_geo_features(ax0, 'global')
         ax0.set_title(label, fontsize=7.5, pad=3)
         im0_last = im0
 
-        ax1 = fig.add_subplot(gs[2, idx], projection=mol)
+        ax1 = fig.add_subplot(gs[1, idx], projection=mol)
         err = data_list[idx + 1]['b2_smooth_estimated'].values - truth_df['b2_true'].values
         im1 = _scatter_map(ax1, lon, lat, err,
                            cmap='RdBu_r', norm=norm_e, s=1.0, transform=_PLATE)
@@ -374,12 +364,12 @@ def fig_spatial_global(results_root, output_dir):
         im1_last = im1
 
     # Vertical colorbars on the right
-    cbar_ax0 = fig.add_subplot(gs[0:2, n_enc])
+    cbar_ax0 = fig.add_subplot(gs[0, n_enc])
     cb0 = plt.colorbar(im0_last, cax=cbar_ax0, label=r'$\beta_2$')
     cb0.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
     cb0.ax.tick_params(labelsize=7); cb0.ax.yaxis.label.set_size(8)
 
-    cbar_ax1 = fig.add_subplot(gs[2, n_enc])
+    cbar_ax1 = fig.add_subplot(gs[1, n_enc])
     cb1 = plt.colorbar(im1_last, cax=cbar_ax1, label='Error')
     cb1.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
     cb1.ax.tick_params(labelsize=7); cb1.ax.yaxis.label.set_size(8)
