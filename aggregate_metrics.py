@@ -75,10 +75,13 @@ def run_statistical_tests(combined, output_dir):
     """
     Paired Wilcoxon tests comparing feature configs and embed dims.
 
-    Three comparisons (per encoder, scale, dgp, spatial_effect):
-      1. emb+coords vs baseline        — do embeddings help over raw coords?
-      2. emb_only vs baseline          — can embeddings replace raw coords?
-      3. emb+coords vs emb_only        — does adding coords on top help?
+    Six comparisons (per encoder, scale, dgp, spatial_effect, training state):
+      1. emb+coords vs baseline (untrained)  — do untrained embeddings + coords help?
+      2. emb+coords vs baseline (trained)    — do trained embeddings + coords help?
+      3. emb_only vs baseline (untrained)    — can untrained embeddings replace coords?
+      4. emb_only vs baseline (trained)      — can trained embeddings replace coords?
+      5. emb+coords vs emb_only (untrained)  — do untrained models benefit from coords?
+      6. emb+coords vs emb_only (trained)    — do trained models benefit from coords?
 
     Uses dim=8 for all feature config comparisons (sweet spot).
     Uses pearson_r and ols_slope as test metrics.
@@ -91,63 +94,74 @@ def run_statistical_tests(combined, output_dir):
     effects = ['SVC_X1_Smooth', 'SVC_X2_Smooth']
     test_metrics = ['pearson_r', 'ols_slope']
 
-    comparisons = [
+    base_comparisons = [
         ('emb+coords', 'baseline',   'emb+coords_vs_baseline'),
         ('emb_only',   'baseline',   'emb_only_vs_baseline'),
         ('emb+coords', 'emb_only',   'emb+coords_vs_emb_only'),
     ]
 
-    group_keys = [k for k in ['scale', 'dgp', 'encoder', 'spatial_effect'] if k in combined.columns]
+    training_states = [False, True]
 
     for scale in combined['scale'].dropna().unique():
         for dgp in combined['dgp'].dropna().unique():
             for effect in effects:
                 for encoder in combined['encoder'].dropna().unique():
                     for metric in test_metrics:
-                        for (cfg_a, cfg_b, label) in comparisons:
-                            # Use dim=8 for feature config comparisons; dim=0 for baseline
-                            dim_a = 0 if cfg_a == 'baseline' else 8
-                            dim_b = 0 if cfg_b == 'baseline' else 8
+                        for trained in training_states:
+                            for (cfg_a, cfg_b, label) in base_comparisons:
+                                # Use dim=8 for feature config comparisons; dim=0 for baseline
+                                dim_a = 0 if cfg_a == 'baseline' else 8
+                                dim_b = 0 if cfg_b == 'baseline' else 8
 
-                            mask_a = (
-                                (combined['scale'] == scale) &
-                                (combined['dgp'] == dgp) &
-                                (combined['encoder'] == encoder) &
-                                (combined['spatial_effect'] == effect) &
-                                (combined['feature_config'] == cfg_a) &
-                                (combined['embed_dim'] == dim_a)
-                            )
-                            mask_b = (
-                                (combined['scale'] == scale) &
-                                (combined['dgp'] == dgp) &
-                                (combined['encoder'] == encoder) &
-                                (combined['spatial_effect'] == effect) &
-                                (combined['feature_config'] == cfg_b) &
-                                (combined['embed_dim'] == dim_b)
-                            )
+                                # Baseline is always encoder_trained=False
+                                trained_a = False if cfg_a == 'baseline' else trained
+                                trained_b = False if cfg_b == 'baseline' else trained
 
-                            a = combined.loc[mask_a, metric].dropna().values
-                            b = combined.loc[mask_b, metric].dropna().values
+                                train_label = "trained" if trained else "untrained"
+                                full_label = f"{label}_{train_label}"
 
-                            if len(a) < 5 or len(b) < 5 or len(a) != len(b):
-                                continue
+                                mask_a = (
+                                    (combined['scale'] == scale) &
+                                    (combined['dgp'] == dgp) &
+                                    (combined['encoder'] == encoder) &
+                                    (combined['spatial_effect'] == effect) &
+                                    (combined['feature_config'] == cfg_a) &
+                                    (combined['embed_dim'] == dim_a) &
+                                    (combined['encoder_trained'] == trained_a)
+                                )
+                                mask_b = (
+                                    (combined['scale'] == scale) &
+                                    (combined['dgp'] == dgp) &
+                                    (combined['encoder'] == encoder) &
+                                    (combined['spatial_effect'] == effect) &
+                                    (combined['feature_config'] == cfg_b) &
+                                    (combined['embed_dim'] == dim_b) &
+                                    (combined['encoder_trained'] == trained_b)
+                                )
 
-                            try:
-                                stat, p = wilcoxon(a, b, alternative='greater')
-                                records.append({
-                                    'scale': scale, 'dgp': dgp,
-                                    'encoder': encoder, 'spatial_effect': effect,
-                                    'metric': metric, 'comparison': label,
-                                    'n': len(a),
-                                    'mean_a': round(a.mean(), 4),
-                                    'mean_b': round(b.mean(), 4),
-                                    'mean_diff': round(a.mean() - b.mean(), 4),
-                                    'statistic': round(stat, 4),
-                                    'p_value': round(p, 4),
-                                    'significant': p < 0.05,
-                                })
-                            except Exception:
-                                pass
+                                a = combined.loc[mask_a, metric].dropna().values
+                                b = combined.loc[mask_b, metric].dropna().values
+
+                                if len(a) < 5 or len(b) < 5 or len(a) != len(b):
+                                    continue
+
+                                try:
+                                    stat, p = wilcoxon(a, b, alternative='greater')
+                                    records.append({
+                                        'scale': scale, 'dgp': dgp,
+                                        'encoder': encoder, 'spatial_effect': effect,
+                                        'metric': metric, 'comparison': full_label,
+                                        'encoder_trained': trained,
+                                        'n': len(a),
+                                        'mean_a': round(a.mean(), 4),
+                                        'mean_b': round(b.mean(), 4),
+                                        'mean_diff': round(a.mean() - b.mean(), 4),
+                                        'statistic': round(stat, 4),
+                                        'p_value': round(p, 4),
+                                        'significant': p < 0.05,
+                                    })
+                                except Exception:
+                                    pass
 
     if not records:
         print("  Not enough data for statistical tests yet.")
@@ -164,13 +178,13 @@ def run_statistical_tests(combined, output_dir):
         (results_df['spatial_effect'] == 'SVC_X1_Smooth') &
         (results_df['metric'] == 'pearson_r')
     ]
-    for label in [c[2] for c in comparisons]:
-        sub = b1_r[b1_r['comparison'] == label]
+    for full_label in sorted(b1_r['comparison'].unique()):
+        sub = b1_r[b1_r['comparison'] == full_label]
         if sub.empty:
             continue
         pct = sub['significant'].mean() * 100
         med_diff = sub['mean_diff'].median()
-        print(f"    {label}: {pct:.0f}% significant, median Δ={med_diff:+.4f}")
+        print(f"    {full_label}: {pct:.0f}% significant, median Δ={med_diff:+.4f}")
 
     return results_df
 
