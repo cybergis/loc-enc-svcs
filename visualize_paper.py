@@ -18,6 +18,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib
+import matplotlib.ticker
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -263,11 +264,11 @@ def fig_main_heatmap(stats, tests, output_dir):
 def fig_spatial_global(results_root, output_dir):
     """Global β₂: true vs estimated for representative encoders."""
     panels = [
-        ('Truth',                               None,                                 None),
-        ('Baseline\n(coords only)',             'global_simple_baseline',             'none'),
-        ('Sphere2Vec-dfs\n(Tier 1, untrained)', 'global_simple_embonly_dim8',         'Sphere2Vec-dfs'),
-        ('Space2Vec-grid\n(Tier 2, trained)',   'global_simple_trained_embonly_dim8', 'Space2Vec-grid'),
-        ('tile_ffn\n(Tier 3, untrained)',       'global_simple_embonly_dim8',         'tile_ffn'),
+        ('Truth',                             None,                                 None),
+        ('Baseline\n(coords only)',           'global_simple_baseline',             'none'),
+        ('Sphere2Vec-dfs\n(emb only)',        'global_simple_embonly_dim8',         'Sphere2Vec-dfs'),
+        ('Space2Vec-grid\n(emb only, trained)','global_simple_trained_embonly_dim8','Space2Vec-grid'),
+        ('tile_ffn\n(emb only)',              'global_simple_embonly_dim8',         'tile_ffn'),
     ]
     n_panels = len(panels)
 
@@ -326,18 +327,23 @@ def fig_spatial_global(results_root, output_dir):
         im1 = _scatter_map(ax1, lon, lat, err,
                            cmap='RdBu_r', norm=norm_e, s=1.0)
         im1_last = im1
-        if idx == 1:
-            ax1.set_ylabel('Error', fontsize=8)
 
-    # Colorbars
+    # Row labels via fig.text (avoids overlap with truth panel)
+    fig.text(0.005, 0.70, r'$\hat{\beta}_2$', va='center', ha='left',
+             fontsize=8, rotation=90)
+    fig.text(0.005, 0.25, 'Error', va='center', ha='left',
+             fontsize=8, rotation=90)
+
+    # Colorbars — use auto ticks + formatter (set_ticks with rounded values can
+    # push ticks outside the norm range and render a blank bar)
     cbar_ax0 = fig.add_subplot(gs[0, n_enc_panels + 1])
     cb0 = plt.colorbar(im0_last, cax=cbar_ax0, label=r'$\beta_2$')
-    cb0.set_ticks(np.round(np.linspace(vmin_c, vmax_c, 5), 1))
+    cb0.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
     cb0.ax.tick_params(labelsize=7); cb0.ax.yaxis.label.set_size(8)
 
     cbar_ax1 = fig.add_subplot(gs[1, n_enc_panels + 1])
     cb1 = plt.colorbar(im1_last, cax=cbar_ax1, label='Error')
-    cb1.set_ticks(np.round([-max_err, -max_err/2, 0, max_err/2, max_err], 1))
+    cb1.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
     cb1.ax.tick_params(labelsize=7); cb1.ax.yaxis.label.set_size(8)
 
     fig.suptitle(r'Global $\beta_2$ Recovery: Representative Encoders (rep 0)',
@@ -390,20 +396,16 @@ def fig_training_effect(stats, output_dir):
             ut_val = ut[metric].values[0] if not ut.empty else np.nan
             tr_val = tr[metric].values[0] if not tr.empty else np.nan
 
-            tier = TIER_LABELS[enc]
-            dot_c = TIER_COLORS[tier]
-            edge_c = TIER_DARK[tier]
-
             if not (np.isnan(ut_val) or np.isnan(tr_val)):
                 lc = '#2ca02c' if tr_val > ut_val else '#d62728'
                 ax.plot([ut_val, tr_val], [i, i], color=lc, alpha=0.45,
                         linewidth=1.8, zorder=1)
 
             if not np.isnan(ut_val):
-                ax.scatter(ut_val, i, color=dot_c, edgecolors=edge_c,
+                ax.scatter(ut_val, i, color='#aec7e8', edgecolors='#1f77b4',
                            linewidths=0.8, s=50, zorder=3, marker='o')
             if not np.isnan(tr_val):
-                ax.scatter(tr_val, i, color=dot_c, edgecolors=edge_c,
+                ax.scatter(tr_val, i, color='#aec7e8', edgecolors='#1f77b4',
                            linewidths=0.8, s=50, zorder=3, marker='D')
 
         if bl_val is not None:
@@ -422,15 +424,12 @@ def fig_training_effect(stats, output_dir):
 
     # Legend to the right of both panels
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#d0d0d0',
-               markeredgecolor='#555', markersize=7, label='Untrained'),
-        Line2D([0], [0], marker='D', color='w', markerfacecolor='#d0d0d0',
-               markeredgecolor='#555', markersize=7, label='Trained'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#aec7e8',
+               markeredgecolor='#1f77b4', markersize=7, label='Untrained'),
+        Line2D([0], [0], marker='D', color='w', markerfacecolor='#aec7e8',
+               markeredgecolor='#1f77b4', markersize=7, label='Trained'),
         Line2D([0], [0], color='#2ca02c', linewidth=2, alpha=0.6, label='Training helps'),
         Line2D([0], [0], color='#d62728', linewidth=2, alpha=0.6, label='Training hurts'),
-        mpatches.Patch(facecolor=TIER_COLORS[1], edgecolor=TIER_DARK[1], label='Tier 1'),
-        mpatches.Patch(facecolor=TIER_COLORS[2], edgecolor=TIER_DARK[2], label='Tier 2'),
-        mpatches.Patch(facecolor=TIER_COLORS[3], edgecolor=TIER_DARK[3], label='Tier 3'),
     ]
     fig.legend(handles=legend_elements, loc='center left', fontsize=8,
                frameon=True, framealpha=0.9,
