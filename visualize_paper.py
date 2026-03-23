@@ -26,6 +26,10 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import Normalize, TwoSlopeNorm
 from matplotlib.lines import Line2D
 import seaborn as sns
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+_PLATE = ccrs.PlateCarree()
 
 # ── Style ─────────────────────────────────────────────────────────────────────
 sns.set_theme(style='whitegrid', context='paper', font_scale=1.0,
@@ -59,14 +63,44 @@ def load_data(results_root):
     return stats, tests
 
 
-def _scatter_map(ax, lon, lat, vals, cmap, norm, s, fix_aspect=False, **kw):
-    """Scatter plot. Optionally applies Mercator-corrected aspect (for county/grid)."""
+def _proj_for_scale(scale):
+    """Return cartopy projection for global/county, None for grid."""
+    if scale == 'global':
+        return ccrs.Mollweide()
+    if scale == 'county':
+        return ccrs.LambertConformal(central_longitude=-96, central_latitude=39,
+                                     standard_parallels=(33, 45))
+    return None
+
+
+def _add_geo_features(ax, scale):
+    """Add land fill, coastlines, and borders appropriate for the scale."""
+    ax.add_feature(cfeature.LAND,      facecolor='#f0f0f0', zorder=0)
+    ax.add_feature(cfeature.OCEAN,     facecolor='white',   zorder=0)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor='#444444', zorder=3)
+    if scale == 'global':
+        ax.set_global()
+    elif scale == 'county':
+        ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor='#666666', zorder=3)
+        ax.add_feature(
+            cfeature.NaturalEarthFeature('cultural',
+                                         'admin_1_states_provinces_lines',
+                                         '50m', facecolor='none'),
+            linewidth=0.15, edgecolor='#aaaaaa', zorder=3)
+        ax.set_extent([-130, -60, 22, 52], crs=_PLATE)
+
+
+def _scatter_map(ax, lon, lat, vals, cmap, norm, s, fix_aspect=False,
+                 transform=None, **kw):
+    """Scatter plot, optionally with a cartopy transform."""
     sc = ax.scatter(lon, lat, c=vals, cmap=cmap, norm=norm,
-                    s=s, linewidths=0, rasterized=True, **kw)
+                    s=s, linewidths=0, rasterized=True,
+                    **(({'transform': transform} if transform else {})), **kw)
     if fix_aspect:
         mean_lat = float(np.mean(np.asarray(lat)))
         ax.set_aspect(1.0 / np.cos(np.radians(mean_lat)))
-    ax.set_xticks([]); ax.set_yticks([])
+    if transform is None:
+        ax.set_xticks([]); ax.set_yticks([])
     return sc
 
 
@@ -115,20 +149,26 @@ def fig_ground_truth(results_root, output_dir):
         row_sc = None
 
         for col, scale in enumerate(scales):
-            ax = fig.add_subplot(gs[row, col])
+            proj = _proj_for_scale(scale)
+            ax = fig.add_subplot(gs[row, col],
+                                 **(({'projection': proj} if proj else {})))
             if scale not in dfs:
                 ax.axis('off'); continue
 
             df = dfs[scale]
             row_sc = _scatter_map(ax, df['lon'], df['lat'], df[coeff],
                                   cmap='coolwarm', norm=norm, s=dot_s[scale],
-                                  fix_aspect=(scale != 'global'))
+                                  transform=_PLATE if proj else None,
+                                  fix_aspect=(scale == 'grid'))
+            if proj:
+                _add_geo_features(ax, scale)
 
             if row == 0:
                 ax.set_title(SCALE_LABELS[scale], fontweight='bold', fontsize=11)
             if col == 0:
                 ax.set_ylabel(label, fontsize=9)
-            sns.despine(ax=ax, left=True, bottom=True)
+            if not proj:
+                sns.despine(ax=ax, left=True, bottom=True)
 
         # One shared colorbar per row (right side)
         if row_sc is not None:
@@ -295,50 +335,53 @@ def fig_spatial_global(results_root, output_dir):
     max_err = np.percentile(np.abs(errs_all), 98)
     norm_e  = TwoSlopeNorm(vmin=-max_err, vcenter=0, vmax=max_err)
 
-    # Layout: truth spans both rows in col 0; cols 1-4 = surface (row 0) + error (row 1)
-    n_enc_panels = n_panels - 1
-    fig = plt.figure(figsize=(12, 5.0))
-    gs = gridspec.GridSpec(2, n_enc_panels + 2,
-                           width_ratios=[1] * (n_enc_panels + 1) + [0.04],
+    # Layout: 2 rows × 5 panels; truth is top-left, errors below cols 1-4
+    # Col 0 row 1 holds the two stacked colorbars (no wasted space)
+    fig = plt.figure(figsize=(12, 4.8))
+    gs = gridspec.GridSpec(2, n_panels,
                            hspace=0.08, wspace=0.06,
-                           left=0.03, right=0.95, top=0.88, bottom=0.03)
+                           left=0.03, right=0.97, top=0.88, bottom=0.03)
 
     lon = truth_df['lon'].values
     lat = truth_df['lat'].values
+    mol = ccrs.Mollweide()
 
-    # Truth: spans both rows, same colormap as estimated surfaces
-    ax_truth = fig.add_subplot(gs[:, 0])
-    im_truth = _scatter_map(ax_truth, lon, lat, truth_df['b2_true'].values,
-                            cmap='coolwarm', norm=norm_c, s=1.0)
-    ax_truth.set_title('Truth', fontsize=7.5, pad=3)
+    # Row 0: Truth + 4 estimated surfaces
+    im0_last = None
+    for col_idx, (label, subdir, _) in enumerate(panels):
+        ax0 = fig.add_subplot(gs[0, col_idx], projection=mol)
+        vals = truth_df['b2_true'].values if col_idx == 0 \
+               else data_list[col_idx]['b2_smooth_estimated'].values
+        im0 = _scatter_map(ax0, lon, lat, vals,
+                           cmap='coolwarm', norm=norm_c, s=1.0, transform=_PLATE)
+        _add_geo_features(ax0, 'global')
+        ax0.set_title(label, fontsize=7.5, pad=3)
+        im0_last = im0
 
-    im0_last = im_truth
+    # Row 1: col 0 = stacked colorbars; cols 1-4 = error maps
     im1_last = None
     for idx, (label, subdir, _) in enumerate(panels[1:], start=1):
-        ax0 = fig.add_subplot(gs[0, idx])
-        ax1 = fig.add_subplot(gs[1, idx])
-
-        im0 = _scatter_map(ax0, lon, lat, data_list[idx]['b2_smooth_estimated'].values,
-                           cmap='coolwarm', norm=norm_c, s=1.0)
-        im0_last = im0
-        ax0.set_title(label, fontsize=7.5, pad=3)
-
+        ax1 = fig.add_subplot(gs[1, idx], projection=mol)
         err = data_list[idx]['b2_smooth_estimated'].values - truth_df['b2_true'].values
         im1 = _scatter_map(ax1, lon, lat, err,
-                           cmap='RdBu_r', norm=norm_e, s=1.0)
+                           cmap='RdBu_r', norm=norm_e, s=1.0, transform=_PLATE)
+        _add_geo_features(ax1, 'global')
         im1_last = im1
 
-    # Colorbars — use auto ticks + formatter (set_ticks with rounded values can
-    # push ticks outside the norm range and render a blank bar)
-    cbar_ax0 = fig.add_subplot(gs[0, n_enc_panels + 1])
-    cb0 = plt.colorbar(im0_last, cax=cbar_ax0, label=r'$\beta_2$')
-    cb0.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
-    cb0.ax.tick_params(labelsize=7); cb0.ax.yaxis.label.set_size(8)
+    # Colorbars stacked in row-1 col-0
+    cbar_gs = gridspec.GridSpecFromSubplotSpec(
+        2, 1, subplot_spec=gs[1, 0], hspace=0.6)
+    cb0 = plt.colorbar(im0_last,
+                       cax=fig.add_subplot(cbar_gs[0]), label=r'$\beta_2$',
+                       orientation='horizontal')
+    cb0.ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
+    cb0.ax.tick_params(labelsize=6); cb0.ax.xaxis.label.set_size(7)
 
-    cbar_ax1 = fig.add_subplot(gs[1, n_enc_panels + 1])
-    cb1 = plt.colorbar(im1_last, cax=cbar_ax1, label='Error')
-    cb1.ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
-    cb1.ax.tick_params(labelsize=7); cb1.ax.yaxis.label.set_size(8)
+    cb1 = plt.colorbar(im1_last,
+                       cax=fig.add_subplot(cbar_gs[1]), label='Error',
+                       orientation='horizontal')
+    cb1.ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
+    cb1.ax.tick_params(labelsize=6); cb1.ax.xaxis.label.set_size(7)
 
     fig.suptitle(r'Global $\beta_2$ Recovery: Representative Encoders (rep 0)',
                  fontsize=11, fontweight='bold', y=0.97)
