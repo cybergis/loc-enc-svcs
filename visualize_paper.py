@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import glob as gl
 import os
 import numpy as np
 import pandas as pd
@@ -20,10 +21,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.patches as mpatches
 from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.lines import Line2D
+from scipy.interpolate import griddata
 import seaborn as sns
 
-# ── Style ────────────────────────────────────────────────────────────────────
+# ── Style ─────────────────────────────────────────────────────────────────────
 sns.set_theme(style='whitegrid', context='paper', font_scale=1.0,
               rc={'figure.dpi': 300, 'savefig.dpi': 300,
                   'savefig.bbox': 'tight', 'savefig.pad_inches': 0.05})
@@ -43,7 +47,9 @@ TIER_LABELS = {
     'rff': 3, 'tile_ffn': 3,
 }
 
-TIER_COLORS = {1: '#2ecc71', 2: '#f39c12', 3: '#e74c3c'}
+# Pastel tier colors
+TIER_COLORS = {1: '#a8d5a2', 2: '#ffd4a3', 3: '#f4a6a6'}
+TIER_DARK   = {1: '#2e8b57', 2: '#cc7a00', 3: '#c0392b'}  # for text/lines
 
 SCALE_LABELS = {'global': 'Global', 'county': 'County', 'grid': 'Grid'}
 
@@ -55,45 +61,81 @@ def load_data(results_root):
     return stats, tests
 
 
+def _to_grid(lon, lat, vals, nx=180, ny=90):
+    """Interpolate scattered lat/lon data onto a regular grid for imshow."""
+    lon_a, lat_a, v_a = np.asarray(lon), np.asarray(lat), np.asarray(vals)
+    lon_g = np.linspace(lon_a.min(), lon_a.max(), nx)
+    lat_g = np.linspace(lat_a.min(), lat_a.max(), ny)
+    LON, LAT = np.meshgrid(lon_g, lat_g)
+    Z = griddata((lon_a, lat_a), v_a, (LON, LAT), method='linear')
+    # Fill edge NaNs with nearest-neighbour
+    Z_nn = griddata((lon_a, lat_a), v_a, (LON, LAT), method='nearest')
+    Z = np.where(np.isnan(Z), Z_nn, Z)
+    extent = [lon_a.min(), lon_a.max(), lat_a.min(), lat_a.max()]
+    return Z, extent
+
+
+def _diverging_norm(vmin, vmax, vcenter=0.0):
+    """TwoSlopeNorm centered on vcenter, clamped to data range."""
+    vcenter = float(np.clip(vcenter, vmin + 1e-6, vmax - 1e-6))
+    return TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Figure 1: Ground Truth Surfaces
 # ═════════════════════════════════════════════════════════════════════════════
 
 def fig_ground_truth(results_root, output_dir):
     """Show true β₀, β₁, β₂ surfaces across all 3 scales."""
-    fig = plt.figure(figsize=(7.2, 7.0))
-    gs = gridspec.GridSpec(3, 3, hspace=0.35, wspace=0.30,
-                           left=0.08, right=0.92, top=0.90, bottom=0.05)
-
     scales = ['global', 'county', 'grid']
-    coeffs = [('b0_true', r'$\beta_0$ (Intercept)'),
-              ('b1_true', r'$\beta_1$ (Smooth gradient)'),
-              ('b2_true', r'$\beta_2$ (Multi-scale oscillation)')]
+    coeffs = [
+        ('b0_true', r'$\beta_0$ (Intercept)'),
+        ('b1_true', r'$\beta_1$ (Smooth gradient)'),
+        ('b2_true', r'$\beta_2$ (Multi-scale oscillation)'),
+    ]
+    grid_res = {'global': (180, 90), 'county': (100, 50), 'grid': (25, 25)}
 
-    for col, scale in enumerate(scales):
-        # Read one rep from baseline
-        csv_path = os.path.join(results_root,
-                                f'{scale}_simple_baseline',
+    # Load all data
+    dfs = {}
+    for scale in scales:
+        csv_path = os.path.join(results_root, f'{scale}_simple_baseline',
                                 'none_MLP_rep0_spatial_effects.csv')
         if not os.path.exists(csv_path):
-            import glob as gl
-            candidates = gl.glob(os.path.join(results_root,
-                                              f'{scale}_simple_baseline',
-                                              '*_rep0_spatial_effects.csv'))
-            csv_path = candidates[0] if candidates else None
+            cands = gl.glob(os.path.join(results_root, f'{scale}_simple_baseline',
+                                         '*_rep0_spatial_effects.csv'))
+            csv_path = cands[0] if cands else None
+        if csv_path:
+            dfs[scale] = pd.read_csv(csv_path)
 
-        if csv_path is None:
-            continue
+    # Shared vmin/vmax per coefficient row (consistent color scale across scales)
+    vlims = {}
+    for coeff, _ in coeffs:
+        all_vals = np.concatenate([dfs[s][coeff].values for s in scales if s in dfs])
+        vlims[coeff] = (np.percentile(all_vals, 2), np.percentile(all_vals, 98))
 
-        df = pd.read_csv(csv_path)
+    # GridSpec with extra narrow column for one colorbar per row
+    fig = plt.figure(figsize=(8.5, 7.2))
+    gs = gridspec.GridSpec(3, 4, width_ratios=[1, 1, 1, 0.06],
+                           hspace=0.45, wspace=0.30,
+                           left=0.08, right=0.94, top=0.90, bottom=0.06)
 
-        for row, (coeff, label) in enumerate(coeffs):
+    for row, (coeff, label) in enumerate(coeffs):
+        vmin, vmax = vlims[coeff]
+        norm = _diverging_norm(vmin, vmax, vcenter=0.0)
+        row_im = None
+
+        for col, scale in enumerate(scales):
             ax = fig.add_subplot(gs[row, col])
-            sc = ax.scatter(df['lon'], df['lat'], c=df[coeff],
-                            s=0.3 if scale == 'global' else (0.8 if scale == 'county' else 8),
-                            cmap=sns.color_palette('RdYlBu_r', as_cmap=True),
-                            rasterized=True)
-            plt.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
+            if scale not in dfs:
+                ax.axis('off')
+                continue
+
+            df = dfs[scale]
+            nx, ny = grid_res[scale]
+            Z, extent = _to_grid(df['lon'], df['lat'], df[coeff], nx=nx, ny=ny)
+            im = ax.imshow(Z, extent=extent, origin='lower', cmap='RdBu_r',
+                           norm=norm, aspect='auto', interpolation='bilinear')
+            row_im = im
 
             if row == 0:
                 ax.set_title(SCALE_LABELS[scale], fontweight='bold', fontsize=11)
@@ -101,13 +143,16 @@ def fig_ground_truth(results_root, output_dir):
                 ax.set_ylabel(label, fontsize=9)
             ax.set_xlabel('')
             ax.tick_params(labelsize=6)
+            sns.despine(ax=ax, left=False, bottom=False)
 
-            if scale == 'global':
-                ax.set_xlim(-180, 180)
-                ax.set_ylim(-90, 90)
-                ax.set_aspect('equal')
+        # Shared colorbar for this row
+        if row_im is not None:
+            cbar_ax = fig.add_subplot(gs[row, 3])
+            cb = plt.colorbar(row_im, cax=cbar_ax)
+            cb.ax.tick_params(labelsize=7)
 
-    fig.suptitle('True Spatially-Varying Coefficients', fontsize=12, fontweight='bold', y=0.96)
+    fig.suptitle('True Spatially-Varying Coefficients', fontsize=12,
+                 fontweight='bold', y=0.95)
     out = os.path.join(output_dir, 'fig_ground_truth.pdf')
     fig.savefig(out)
     plt.close(fig)
@@ -120,34 +165,33 @@ def fig_ground_truth(results_root, output_dir):
 
 def fig_main_heatmap(stats, tests, output_dir):
     """Heatmap of β₂ OLS slope and Pearson r across encoders, scales, conditions."""
-    metrics = [('ols_slope_mean', r'Amplitude Recovery (OLS Slope)'),
-               ('pearson_r_mean', r'Pattern Recovery (Pearson $r$)')]
-
+    metrics = [
+        ('ols_slope_mean', r'Amplitude Recovery (OLS Slope)'),
+        ('pearson_r_mean', r'Pattern Recovery (Pearson $r$)'),
+    ]
     conditions = [
         ('baseline', False, 'BL'),
         ('emb_only', False, 'EO'),
-        ('emb_only', True, 'EO-T'),
+        ('emb_only', True,  'EO-T'),
     ]
-    scales = ['global', 'county', 'grid']
-    n_cond = len(conditions)
-    n_enc = len(ENCODER_ORDER)
-    n_cols = len(scales) * n_cond
+    scales  = ['global', 'county', 'grid']
+    n_cond  = len(conditions)
+    n_enc   = len(ENCODER_ORDER)
+    n_cols  = len(scales) * n_cond
 
-    # Build column labels for sns.heatmap
     col_labels = []
     for scale in scales:
         for _, _, short in conditions:
             col_labels.append(f'{SCALE_LABELS[scale]}\n{short}')
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5),
-                             gridspec_kw={'wspace': 0.30,
-                                          'left': 0.14, 'right': 0.95,
-                                          'top': 0.88, 'bottom': 0.12})
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6),
+                             gridspec_kw={'wspace': 0.35})
+    plt.subplots_adjust(left=0.16, right=0.96, top=0.86, bottom=0.20)
 
     for ax_idx, (metric, title) in enumerate(metrics):
         ax = axes[ax_idx]
 
-        # Build matrix
+        # Build data matrix
         matrix = np.full((n_enc, n_cols), np.nan)
         for i, enc in enumerate(ENCODER_ORDER):
             for j, scale in enumerate(scales):
@@ -162,52 +206,44 @@ def fig_main_heatmap(stats, tests, output_dir):
                         (stats['encoder_trained'] == trained) &
                         (stats['spatial_effect'] == 'SVC_X2_Smooth')
                     )
-                    vals = stats.loc[mask, metric]
-                    if not vals.empty:
-                        matrix[i, col] = vals.values[0]
+                    v = stats.loc[mask, metric]
+                    if not v.empty:
+                        matrix[i, col] = v.values[0]
 
-        # Build annotation matrix with significance stars
+        # Build annotation strings (value + significance star)
+        metric_name = 'ols_slope' if 'slope' in metric else 'pearson_r'
         annot = np.full((n_enc, n_cols), '', dtype=object)
-        for i in range(n_enc):
+        for i, enc in enumerate(ENCODER_ORDER):
             for j in range(n_cols):
                 val = matrix[i, j]
-                if np.isnan(val):
-                    annot[i, j] = '—'
-                else:
-                    annot[i, j] = f'{val:.2f}'
+                annot[i, j] = '—' if np.isnan(val) else f'{val:.2f}'
 
-        # Add significance markers to annotations
-        metric_name = 'ols_slope' if 'slope' in metric else 'pearson_r'
         for i, enc in enumerate(ENCODER_ORDER):
             for j, scale in enumerate(scales):
                 for k, (fc, trained, _) in enumerate(conditions):
                     if fc == 'baseline':
                         continue
                     col = j * n_cond + k
-                    train_label = 'trained' if trained else 'untrained'
-                    comp = f'emb_only_vs_baseline_{train_label}'
+                    train_lbl = 'trained' if trained else 'untrained'
                     tmask = (
                         (tests['encoder'] == enc) &
                         (tests['scale'] == scale) &
-                        (tests['comparison'] == comp) &
+                        (tests['comparison'] == f'emb_only_vs_baseline_{train_lbl}') &
                         (tests['spatial_effect'] == 'SVC_X2_Smooth') &
                         (tests['metric'] == metric_name)
                     )
                     rows = tests.loc[tmask]
                     if not rows.empty and rows.iloc[0]['significant']:
-                        annot[i, col] = annot[i, col] + '*'
+                        annot[i, col] += '*'
 
-        # Colormap range
         vmin = 0.0 if 'slope' in metric else 0.3
-        vmax = 1.0
-
-        df_matrix = pd.DataFrame(matrix, index=ENCODER_ORDER, columns=col_labels)
-        sns.heatmap(df_matrix, ax=ax, cmap='RdYlGn', vmin=vmin, vmax=vmax,
+        df_m = pd.DataFrame(matrix, index=ENCODER_ORDER, columns=col_labels)
+        sns.heatmap(df_m, ax=ax, cmap='RdYlGn', vmin=vmin, vmax=1.0,
                     annot=annot, fmt='', annot_kws={'size': 7},
-                    linewidths=0.5, linecolor='white',
-                    cbar_kws={'shrink': 0.7, 'pad': 0.03})
+                    linewidths=0.4, linecolor='white',
+                    cbar_kws={'shrink': 0.65, 'pad': 0.02})
 
-        # Scale group separators (thicker white lines)
+        # Scale group separators
         for sep in [n_cond, 2 * n_cond]:
             ax.axvline(sep, color='white', linewidth=3)
 
@@ -215,27 +251,38 @@ def fig_main_heatmap(stats, tests, output_dir):
         ax.axhline(3, color='white', linewidth=3)
         ax.axhline(9, color='white', linewidth=3)
 
-        # Tier color dots on y-axis
+        # Color y-tick labels by tier (replaces confusing dot markers)
         if ax_idx == 0:
-            for i, enc in enumerate(ENCODER_ORDER):
-                tier = TIER_LABELS[enc]
-                ax.plot(-0.03, (i + 0.5) / n_enc, 'o', color=TIER_COLORS[tier],
-                        markersize=6, clip_on=False, transform=ax.transAxes)
+            for tick in ax.get_yticklabels():
+                enc = tick.get_text()
+                if enc in TIER_LABELS:
+                    tick.set_color(TIER_DARK[TIER_LABELS[enc]])
+                    tick.set_fontweight('bold')
         else:
             ax.set_yticklabels([])
 
         ax.set_title(title, fontsize=10, fontweight='bold', pad=10)
         ax.set_xlabel('')
         ax.set_ylabel('')
+        ax.tick_params(axis='x', labelsize=7.5)
+
+    # Tier legend (upper-left of left panel)
+    tier_patches = [
+        mpatches.Patch(facecolor=TIER_COLORS[t], edgecolor=TIER_DARK[t], linewidth=0.8,
+                       label=f'Tier {t}')
+        for t in [1, 2, 3]
+    ]
+    axes[0].legend(handles=tier_patches, loc='upper left', fontsize=7.5,
+                   framealpha=0.85, title='Encoder tier', title_fontsize=7.5)
 
     fig.suptitle(r'$\beta_2$ SVC Recovery (Multi-Scale Oscillation)',
-                 fontsize=12, fontweight='bold', y=0.96)
+                 fontsize=12, fontweight='bold')
 
-    # Legend at bottom
-    fig.text(0.5, 0.02,
-             'BL = Baseline (coords only)      '
-             'EO = Embedding Only (untrained)      '
-             'EO-T = Embedding Only (trained)      '
+    # Abbreviation legend below both panels (with enough padding)
+    fig.text(0.5, 0.05,
+             'BL = Baseline (coords only)   '
+             'EO = Embedding Only (untrained)   '
+             'EO-T = Embedding Only (trained)   '
              '* significantly > baseline (p<0.05)',
              ha='center', fontsize=7.5, style='italic', color='#555555')
 
@@ -251,26 +298,18 @@ def fig_main_heatmap(stats, tests, output_dir):
 
 def fig_spatial_global(results_root, output_dir):
     """Global β₂: true vs estimated for representative encoders."""
-    # Representative encoders: Tier1, Tier2 (trained), Tier3, Baseline
     panels = [
-        ('Truth', None, None, None),
-        ('Baseline\n(coords only)', 'global_simple_baseline', 'none', None),
-        ('Sphere2Vec-dfs\n(Tier 1, emb only)', 'global_simple_embonly_dim8', 'Sphere2Vec-dfs', None),
-        ('Space2Vec-grid\n(Tier 2, trained emb only)', 'global_simple_trained_embonly_dim8', 'Space2Vec-grid', None),
-        ('tile_ffn\n(Tier 3, emb only)', 'global_simple_embonly_dim8', 'tile_ffn', None),
+        ('Truth',                                    None,                                    None),
+        ('Baseline\n(coords only)',                  'global_simple_baseline',                'none'),
+        ('Sphere2Vec-dfs\n(Tier 1, untrained)',      'global_simple_embonly_dim8',            'Sphere2Vec-dfs'),
+        ('Space2Vec-grid\n(Tier 2, trained)',        'global_simple_trained_embonly_dim8',    'Space2Vec-grid'),
+        ('tile_ffn\n(Tier 3, untrained)',            'global_simple_embonly_dim8',            'tile_ffn'),
     ]
+    n_panels = len(panels)
 
-    fig, axes = plt.subplots(2, 5, figsize=(11, 4.2),
-                             gridspec_kw={'hspace': 0.05, 'wspace': 0.08,
-                                          'left': 0.04, 'right': 0.96,
-                                          'top': 0.88, 'bottom': 0.05})
-
-    truth_df = None
-    vmin_coeff, vmax_coeff = None, None
-
-    # Load data and find color range
-    data_list = []
-    for label, subdir, enc, _ in panels:
+    # Load data
+    data_list, truth_df = [], None
+    for _, subdir, enc in panels:
         if subdir is None:
             data_list.append(None)
             continue
@@ -278,66 +317,82 @@ def fig_spatial_global(results_root, output_dir):
         df = pd.read_csv(csv)
         if truth_df is None:
             truth_df = df
-            vmin_coeff = df['b2_true'].quantile(0.02)
-            vmax_coeff = df['b2_true'].quantile(0.98)
         data_list.append(df)
 
-    norm_coeff = Normalize(vmin=vmin_coeff, vmax=vmax_coeff)
+    # Color range from truth
+    vmin_c = np.percentile(truth_df['b2_true'], 2)
+    vmax_c = np.percentile(truth_df['b2_true'], 98)
+    norm_c = _diverging_norm(vmin_c, vmax_c, vcenter=0.0)
 
-    # Row 1: Coefficient surfaces
-    for col, (label, subdir, enc, _) in enumerate(panels):
-        ax = axes[0, col]
-        if col == 0:
-            vals = truth_df['b2_true']
+    # Error range
+    errs = []
+    for col_idx, (_, subdir, _) in enumerate(panels):
+        if subdir is None:
+            continue
+        err = data_list[col_idx]['b2_smooth_estimated'] - truth_df['b2_true']
+        errs.append(err)
+    max_err = np.percentile(np.abs(np.concatenate(errs)), 98)
+    norm_e = TwoSlopeNorm(vmin=-max_err, vcenter=0, vmax=max_err)
+
+    # Precompute grids (global: 180×90)
+    truth_grid, extent = _to_grid(truth_df['lon'], truth_df['lat'],
+                                   truth_df['b2_true'], nx=180, ny=90)
+    est_grids, err_grids = [], []
+    for col_idx, (_, subdir, _) in enumerate(panels):
+        if subdir is None:
+            est_grids.append(None); err_grids.append(None)
+            continue
+        df = data_list[col_idx]
+        eg, _ = _to_grid(df['lon'], df['lat'], df['b2_smooth_estimated'], nx=180, ny=90)
+        er, _ = _to_grid(df['lon'], df['lat'],
+                          df['b2_smooth_estimated'] - truth_df['b2_true'], nx=180, ny=90)
+        est_grids.append(eg); err_grids.append(er)
+
+    # Layout: 2 rows (coeff, error) × n_panels cols + 1 narrow colorbar col each
+    fig = plt.figure(figsize=(12, 5.0))
+    gs = gridspec.GridSpec(2, n_panels + 1,
+                           width_ratios=[1]*n_panels + [0.04],
+                           hspace=0.12, wspace=0.08,
+                           left=0.04, right=0.95, top=0.88, bottom=0.04)
+
+    imshow_kw = dict(origin='lower', extent=extent, aspect='auto',
+                     interpolation='bilinear')
+
+    for col_idx, (label, subdir, _) in enumerate(panels):
+        # Row 0: β₂ surface
+        ax0 = fig.add_subplot(gs[0, col_idx])
+        if col_idx == 0:
+            im0 = ax0.imshow(truth_grid, cmap='RdBu_r', norm=norm_c, **imshow_kw)
         else:
-            vals = data_list[col]['b2_smooth_estimated']
+            im0 = ax0.imshow(est_grids[col_idx], cmap='RdBu_r', norm=norm_c, **imshow_kw)
+        ax0.set_xticks([]); ax0.set_yticks([])
+        ax0.set_title(label, fontsize=7.5, pad=3)
+        if col_idx == 0:
+            ax0.set_ylabel(r'$\hat{\beta}_2$ surface', fontsize=8)
 
-        sc = ax.scatter(truth_df['lon'], truth_df['lat'], c=vals,
-                        s=0.15, cmap='RdYlBu_r', norm=norm_coeff, rasterized=True)
-        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
-        ax.set_aspect('equal')
-        ax.set_title(label, fontsize=7.5, pad=3)
-        ax.set_xticks([]); ax.set_yticks([])
-        if col == 0:
-            ax.set_ylabel(r'$\hat{\beta}_2$ surface', fontsize=8)
-
-    # Row 2: Error maps
-    max_err = 0
-    errors = []
-    for col, (label, subdir, enc, _) in enumerate(panels):
-        if col == 0:
-            errors.append(None)
-            continue
-        err = data_list[col]['b2_smooth_estimated'] - truth_df['b2_true']
-        errors.append(err)
-        max_err = max(max_err, np.abs(err).quantile(0.98))
-
-    norm_err = TwoSlopeNorm(vmin=-max_err, vcenter=0, vmax=max_err)
-
-    for col in range(5):
-        ax = axes[1, col]
-        if col == 0:
-            ax.axis('off')
-            continue
-        sc = ax.scatter(truth_df['lon'], truth_df['lat'], c=errors[col],
-                        s=0.15, cmap='RdBu_r', norm=norm_err, rasterized=True)
-        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
-        ax.set_aspect('equal')
-        ax.set_xticks([]); ax.set_yticks([])
-        if col == 1:
-            ax.set_ylabel('Estimation error', fontsize=8)
+        # Row 1: error map
+        ax1 = fig.add_subplot(gs[1, col_idx])
+        if col_idx == 0:
+            ax1.axis('off')
+        else:
+            im1 = ax1.imshow(err_grids[col_idx], cmap='RdBu_r', norm=norm_e, **imshow_kw)
+            ax1.set_xticks([]); ax1.set_yticks([])
+            if col_idx == 1:
+                ax1.set_ylabel('Estimation error', fontsize=8)
 
     # Colorbars
-    cbar_ax1 = fig.add_axes([0.97, 0.52, 0.01, 0.35])
-    plt.colorbar(plt.cm.ScalarMappable(norm=norm_coeff, cmap='RdYlBu_r'),
-                 cax=cbar_ax1, label=r'$\beta_2$')
-    cbar_ax2 = fig.add_axes([0.97, 0.07, 0.01, 0.35])
-    plt.colorbar(plt.cm.ScalarMappable(norm=norm_err, cmap='RdBu_r'),
-                 cax=cbar_ax2, label='Error')
+    cbar_ax0 = fig.add_subplot(gs[0, n_panels])
+    plt.colorbar(im0, cax=cbar_ax0, label=r'$\beta_2$')
+    cbar_ax0.yaxis.label.set_size(8)
+    cbar_ax0.tick_params(labelsize=7)
+
+    cbar_ax1 = fig.add_subplot(gs[1, n_panels])
+    plt.colorbar(im1, cax=cbar_ax1, label='Error')
+    cbar_ax1.yaxis.label.set_size(8)
+    cbar_ax1.tick_params(labelsize=7)
 
     fig.suptitle(r'Global $\beta_2$ Recovery: Representative Encoders (rep 0)',
                  fontsize=11, fontweight='bold', y=0.97)
-
     out = os.path.join(output_dir, 'fig_spatial_global.pdf')
     fig.savefig(out)
     plt.close(fig)
@@ -350,17 +405,19 @@ def fig_spatial_global(results_root, output_dir):
 
 def fig_training_effect(stats, output_dir):
     """Paired dot plot: untrained vs trained emb_only for each encoder on global β₂."""
-    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.5),
-                             gridspec_kw={'wspace': 0.35})
+    metrics = [
+        ('ols_slope_mean', 'OLS Slope (Amplitude)'),
+        ('pearson_r_mean', r'Pearson $r$ (Pattern)'),
+    ]
+    n_enc = len(ENCODER_ORDER)
 
-    metrics = [('ols_slope_mean', 'OLS Slope (Amplitude)'),
-               ('pearson_r_mean', r'Pearson $r$ (Pattern)')]
+    fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.0),
+                             gridspec_kw={'wspace': 0.25})
+    plt.subplots_adjust(left=0.18, right=0.78, top=0.88, bottom=0.12)
 
-    tier_palette = {1: '#2ecc71', 2: '#f39c12', 3: '#e74c3c'}
-
-    for ax_idx, (metric, ylabel) in enumerate(metrics):
+    for ax_idx, (metric, xlabel) in enumerate(metrics):
         ax = axes[ax_idx]
-        sns.despine(ax=ax, left=True)
+        sns.despine(ax=ax, left=True, bottom=False)
 
         sub = stats[
             (stats['scale'] == 'global') &
@@ -368,9 +425,7 @@ def fig_training_effect(stats, output_dir):
             (stats['feature_config'] == 'emb_only') &
             (stats['embed_dim'] == 8) &
             (stats['encoder'].isin(ENCODER_ORDER))
-        ].copy()
-
-        # Get baseline reference
+        ]
         bl = stats[
             (stats['scale'] == 'global') &
             (stats['spatial_effect'] == 'SVC_X2_Smooth') &
@@ -380,66 +435,65 @@ def fig_training_effect(stats, output_dir):
         ]
         bl_val = bl[metric].values[0] if not bl.empty else None
 
-        y_positions = np.arange(len(ENCODER_ORDER))
-
         for i, enc in enumerate(ENCODER_ORDER):
-            untrained = sub[(sub['encoder'] == enc) & (sub['encoder_trained'] == False)]
-            trained = sub[(sub['encoder'] == enc) & (sub['encoder_trained'] == True)]
-
-            ut_val = untrained[metric].values[0] if not untrained.empty else np.nan
-            tr_val = trained[metric].values[0] if not trained.empty else np.nan
+            ut = sub[(sub['encoder'] == enc) & (sub['encoder_trained'] == False)]
+            tr = sub[(sub['encoder'] == enc) & (sub['encoder_trained'] == True)]
+            ut_val = ut[metric].values[0] if not ut.empty else np.nan
+            tr_val = tr[metric].values[0] if not tr.empty else np.nan
 
             tier = TIER_LABELS[enc]
-            color = tier_palette[tier]
+            dot_color = TIER_COLORS[tier]
+            edge_color = TIER_DARK[tier]
 
-            # Draw connecting line
+            # Connecting line
             if not (np.isnan(ut_val) or np.isnan(tr_val)):
-                line_color = '#2ecc71' if tr_val > ut_val else '#e74c3c'
-                ax.plot([ut_val, tr_val], [i, i], color=line_color, alpha=0.4,
-                        linewidth=2, zorder=1)
+                lc = '#2e8b57' if tr_val > ut_val else '#c0392b'
+                ax.plot([ut_val, tr_val], [i, i], color=lc, alpha=0.5,
+                        linewidth=1.8, zorder=1)
 
-            # Untrained dot
             if not np.isnan(ut_val):
-                ax.scatter(ut_val, i, color=color, s=40,
-                           edgecolors='black', linewidths=0.5, zorder=3,
-                           marker='o')
-            # Trained dot
+                ax.scatter(ut_val, i, color=dot_color, edgecolors=edge_color,
+                           linewidths=0.8, s=50, zorder=3, marker='o')
             if not np.isnan(tr_val):
-                ax.scatter(tr_val, i, color=color, s=40,
-                           edgecolors='black', linewidths=0.5, zorder=3,
-                           marker='D')
+                ax.scatter(tr_val, i, color=dot_color, edgecolors=edge_color,
+                           linewidths=0.8, s=50, zorder=3, marker='D')
 
-        # Baseline reference line
         if bl_val is not None:
-            ax.axvline(bl_val, color='gray', linestyle='--', linewidth=0.8,
-                       alpha=0.7, zorder=0)
-            ax.text(bl_val, len(ENCODER_ORDER) - 0.3, 'Baseline',
-                    fontsize=6.5, color='gray', ha='center', va='bottom')
+            ax.axvline(bl_val, color='#888888', linestyle='--', linewidth=0.9,
+                       alpha=0.8, zorder=0)
+            ax.text(bl_val + 0.003, n_enc - 0.6, 'Baseline',
+                    fontsize=6.5, color='#888888', ha='left', va='bottom')
 
-        ax.set_yticks(y_positions)
+        ax.set_yticks(range(n_enc))
         ax.set_yticklabels(ENCODER_ORDER if ax_idx == 0 else [], fontsize=7.5)
-        ax.set_xlabel(ylabel, fontsize=9)
+        if ax_idx == 0:
+            for tick in ax.get_yticklabels():
+                enc = tick.get_text()
+                if enc in TIER_LABELS:
+                    tick.set_color(TIER_DARK[TIER_LABELS[enc]])
+                    tick.set_fontweight('bold')
+        ax.set_xlabel(xlabel, fontsize=9)
         ax.invert_yaxis()
-        ax.set_title(f'Global $\\beta_2$: {ylabel}', fontsize=9, fontweight='bold')
+        ax.set_title(f'Global $\\beta_2$: {xlabel}', fontsize=9, fontweight='bold')
 
-        # Tier separators
-        ax.axhline(2.5, color='lightgray', linewidth=0.8, linestyle='-')
-        ax.axhline(8.5, color='lightgray', linewidth=0.8, linestyle='-')
+        ax.axhline(2.5, color='lightgray', linewidth=0.8)
+        ax.axhline(8.5, color='lightgray', linewidth=0.8)
 
-    # Legend
-    from matplotlib.lines import Line2D
+    # Legend to the right of both panels
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-               markeredgecolor='black', markersize=6, label='Untrained'),
-        Line2D([0], [0], marker='D', color='w', markerfacecolor='gray',
-               markeredgecolor='black', markersize=6, label='Trained'),
-        Line2D([0], [0], color='#2ecc71', linewidth=2, alpha=0.5,
-               label='Training helps'),
-        Line2D([0], [0], color='#e74c3c', linewidth=2, alpha=0.5,
-               label='Training hurts'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#cccccc',
+               markeredgecolor='#555', markersize=7, label='Untrained'),
+        Line2D([0], [0], marker='D', color='w', markerfacecolor='#cccccc',
+               markeredgecolor='#555', markersize=7, label='Trained'),
+        Line2D([0], [0], color='#2e8b57', linewidth=2, alpha=0.6, label='Training helps'),
+        Line2D([0], [0], color='#c0392b', linewidth=2, alpha=0.6, label='Training hurts'),
+        mpatches.Patch(facecolor=TIER_COLORS[1], edgecolor=TIER_DARK[1], label='Tier 1'),
+        mpatches.Patch(facecolor=TIER_COLORS[2], edgecolor=TIER_DARK[2], label='Tier 2'),
+        mpatches.Patch(facecolor=TIER_COLORS[3], edgecolor=TIER_DARK[3], label='Tier 3'),
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=4,
-               fontsize=7.5, frameon=False, bbox_to_anchor=(0.5, -0.05))
+    fig.legend(handles=legend_elements, loc='center left', fontsize=8,
+               frameon=True, framealpha=0.9,
+               bbox_to_anchor=(0.80, 0.5), borderaxespad=0)
 
     out = os.path.join(output_dir, 'fig_training_effect.pdf')
     fig.savefig(out)
@@ -450,6 +504,19 @@ def fig_training_effect(stats, output_dir):
 # ═════════════════════════════════════════════════════════════════════════════
 # LaTeX Table: Main Results
 # ═════════════════════════════════════════════════════════════════════════════
+
+def _is_significant(tests, encoder, scale, metric, train_label):
+    """Check if emb_only vs baseline is significant."""
+    mask = (
+        (tests['encoder'] == encoder) &
+        (tests['scale'] == scale) &
+        (tests['comparison'] == f'emb_only_vs_baseline_{train_label}') &
+        (tests['spatial_effect'] == 'SVC_X2_Smooth') &
+        (tests['metric'] == metric)
+    )
+    rows = tests.loc[mask]
+    return bool(rows.iloc[0]['significant']) if not rows.empty else False
+
 
 def tab_main_results(stats, tests, output_dir):
     """Generate LaTeX table of key metrics for β₂ smooth."""
@@ -473,8 +540,8 @@ def tab_main_results(stats, tests, output_dir):
                  r'Pearson $r$ & OLS slope \\')
     lines.append(r'\midrule')
 
-    # Baseline row first
-    lines.append(r'\multicolumn{2}{l}{\textit{Baseline (coords only)}}')
+    # Baseline row
+    line = r'\multicolumn{2}{l}{\textit{Baseline (coords only)}}'
     for scale in ['global', 'county', 'grid']:
         mask = (
             (stats['scale'] == scale) &
@@ -484,14 +551,12 @@ def tab_main_results(stats, tests, output_dir):
         )
         row = stats.loc[mask]
         if not row.empty:
-            r_val = row['pearson_r_mean'].values[0]
-            r_std = row['pearson_r_std'].values[0]
-            s_val = row['ols_slope_mean'].values[0]
-            s_std = row['ols_slope_std'].values[0]
-            lines[-1] += f' & {r_val:.3f}$\\pm${r_std:.3f} & {s_val:.3f}$\\pm${s_std:.3f}'
+            r_v, r_s = row['pearson_r_mean'].values[0], row['pearson_r_std'].values[0]
+            s_v, s_s = row['ols_slope_mean'].values[0], row['ols_slope_std'].values[0]
+            line += f' & {r_v:.3f}$\\pm${r_s:.3f} & {s_v:.3f}$\\pm${s_s:.3f}'
         else:
-            lines[-1] += r' & --- & ---'
-    lines[-1] += r' \\'
+            line += r' & --- & ---'
+    lines.append(line + r' \\')
     lines.append(r'\midrule')
     lines.append(r'\multicolumn{8}{l}{\textit{Embedding only (untrained)}} \\')
 
@@ -514,23 +579,14 @@ def tab_main_results(stats, tests, output_dir):
             )
             row = stats.loc[mask]
             if not row.empty:
-                r_val = row['pearson_r_mean'].values[0]
-                r_std = row['pearson_r_std'].values[0]
-                s_val = row['ols_slope_mean'].values[0]
-                s_std = row['ols_slope_std'].values[0]
-
-                # Check significance
-                sig_r = _is_significant(tests, enc, scale, 'pearson_r', 'untrained')
-                sig_s = _is_significant(tests, enc, scale, 'ols_slope', 'untrained')
-
-                star_r = '*' if sig_r else ''
-                star_s = '*' if sig_s else ''
-
-                line += f' & {r_val:.3f}{star_r} & {s_val:.3f}{star_s}'
+                r_v = row['pearson_r_mean'].values[0]
+                s_v = row['ols_slope_mean'].values[0]
+                star_r = '*' if _is_significant(tests, enc, scale, 'pearson_r', 'untrained') else ''
+                star_s = '*' if _is_significant(tests, enc, scale, 'ols_slope', 'untrained') else ''
+                line += f' & {r_v:.3f}{star_r} & {s_v:.3f}{star_s}'
             else:
                 line += r' & --- & ---'
-        line += r' \\'
-        lines.append(line)
+        lines.append(line + r' \\')
 
     lines.append(r'\bottomrule')
     lines.append(r'\end{tabular}')
@@ -543,22 +599,6 @@ def tab_main_results(stats, tests, output_dir):
     print(f'Saved: {out}')
 
 
-def _is_significant(tests, encoder, scale, metric, train_label):
-    """Check if emb_only vs baseline is significant."""
-    comp = f'emb_only_vs_baseline_{train_label}'
-    mask = (
-        (tests['encoder'] == encoder) &
-        (tests['scale'] == scale) &
-        (tests['comparison'] == comp) &
-        (tests['spatial_effect'] == 'SVC_X2_Smooth') &
-        (tests['metric'] == metric)
-    )
-    rows = tests.loc[mask]
-    if not rows.empty:
-        return rows.iloc[0]['significant']
-    return False
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Main
 # ═════════════════════════════════════════════════════════════════════════════
@@ -566,17 +606,16 @@ def _is_significant(tests, encoder, scale, metric, train_label):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate paper figures')
     parser.add_argument('--results_root', type=str, default='./results')
-    parser.add_argument('--output_dir', type=str, default='./plots')
+    parser.add_argument('--output_dir',   type=str, default='./plots')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-
     stats, tests = load_data(args.results_root)
 
-    print("Generating figures...")
+    print('Generating figures...')
     fig_ground_truth(args.results_root, args.output_dir)
     fig_main_heatmap(stats, tests, args.output_dir)
     fig_spatial_global(args.results_root, args.output_dir)
     fig_training_effect(stats, args.output_dir)
     tab_main_results(stats, tests, args.output_dir)
-    print("Done!")
+    print('Done!')
