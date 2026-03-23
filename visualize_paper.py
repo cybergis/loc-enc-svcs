@@ -328,12 +328,6 @@ def fig_spatial_global(results_root, output_dir):
                            cmap='RdBu_r', norm=norm_e, s=1.0)
         im1_last = im1
 
-    # Row labels via fig.text (avoids overlap with truth panel)
-    fig.text(0.005, 0.70, r'$\hat{\beta}_2$', va='center', ha='left',
-             fontsize=8, rotation=90)
-    fig.text(0.005, 0.25, 'Error', va='center', ha='left',
-             fontsize=8, rotation=90)
-
     # Colorbars — use auto ticks + formatter (set_ticks with rounded values can
     # push ticks outside the norm range and render a blank bar)
     cbar_ax0 = fig.add_subplot(gs[0, n_enc_panels + 1])
