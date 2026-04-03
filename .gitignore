@@ -2,6 +2,7 @@
 data/
 results/
 figs/
+plots/
 
 # Python
 .venv/
