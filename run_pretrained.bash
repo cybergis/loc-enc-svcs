@@ -116,7 +116,9 @@ conda activate e
 
 mkdir -p "$OUTPUT_DIR" slurm_logs
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
+# mgwr/joblib workers on Python 3.13 call os.getcwd() which fails if the
+# SLURM spool dir is deleted. Pin TMPDIR and change to a stable directory first.
+export TMPDIR=/tmp
 cd "$SCRIPT_DIR"
 python $SCRIPT \
     --encoder_index $ENCODER_IDX \

@@ -69,7 +69,7 @@ conda activate e
 
 mkdir -p "$OUTPUT_DIR" slurm_logs
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
+export TMPDIR=/tmp
 cd "$SCRIPT_DIR"
 python $SCRIPT \
     --encoder_index $ENCODER_IDX \
