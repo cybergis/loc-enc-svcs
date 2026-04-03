@@ -34,10 +34,16 @@ All encoders are from [TorchSpatial](https://github.com/seai-lab/TorchSpatial) (
 ```bash
 git clone https://github.com/danielkiv/ExplainEmbeddingSpatialEffects.git
 cd ExplainEmbeddingSpatialEffects
-pip install -r requirements.txt
+pip install -e .
 ```
 
-TorchSpatial is included in the repo under `TorchSpatial/` (MIT licensed).
+This installs all dependencies including [TorchSpatial](https://github.com/danielkiv/TorchSpatial) (MIT licensed), which is pulled automatically from GitHub.
+
+For development (includes pytest):
+
+```bash
+pip install -e ".[dev]"
+```
 
 ## Usage
 
@@ -86,7 +92,7 @@ help_utils.py           # Location encoder wrapper + spatial metrics
 aggregate_metrics.py    # Combine results across encoders
 visualize_grid_aggregated.py   # Grid result visualizations
 visualize_counties.py          # County choropleth visualizations
-TorchSpatial/           # Location encoder implementations (MIT, Wu et al.)
+TorchSpatial/           # (removed; installed as pip package from danielkiv/TorchSpatial)
 tests/                  # Unit tests
 ```
 
