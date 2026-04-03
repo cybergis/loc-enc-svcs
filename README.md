@@ -38,8 +38,8 @@ All encoders are from [TorchSpatial](https://github.com/seai-lab/TorchSpatial) (
 ## Setup
 
 ```bash
-git clone https://github.com/danielkiv/ExplainEmbeddingSpatialEffects.git
-cd ExplainEmbeddingSpatialEffects
+git clone https://github.com/danielkiv/loc-enc-svcs.git
+cd loc-enc-svcs
 pip install -e .
 ```
 

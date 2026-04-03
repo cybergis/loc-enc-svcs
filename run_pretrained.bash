@@ -61,7 +61,7 @@ ENCODER_NAMES=(
 )
 
 PT_DIR="/u/dkiv2/group_dkiv2/active/TorchSpatial/pre_trained_models"
-SCRIPT_DIR="/u/dkiv2/group_dkiv2/active/effectsExplainableEmbeddings"
+SCRIPT_DIR="/u/dkiv2/group_dkiv2/active/loc-enc-svcs"
 
 CHECKPOINTS=(
     "${PT_DIR}/space2vec_theory/model_inat_2018_Space2Vec-theory_0.0200_64_0.0500000_360.000_1_512_BATCH4096_leakyrelu.pth.tar"                     # 0 inat_2018

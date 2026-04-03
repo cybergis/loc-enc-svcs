@@ -45,7 +45,7 @@ echo "Extra: $EXTRA_FLAGS"
 echo "========================================"
 
 # Conda setup — find conda from standard locations, no hardcoded home dir
-SCRIPT_DIR="/u/dkiv2/group_dkiv2/active/effectsExplainableEmbeddings"
+SCRIPT_DIR="/u/dkiv2/group_dkiv2/active/loc-enc-svcs"
 if command -v conda &>/dev/null; then
     CONDA_BASE=$(conda info --base 2>/dev/null)
 elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
