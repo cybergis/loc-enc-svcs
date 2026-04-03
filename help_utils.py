@@ -160,14 +160,17 @@ def load_pretrained_encoder(checkpoint_path, device="cpu"):
     full_state = net_params["state_dict"]
 
     frequency_num = params.get("frequency_num") or params.get("freq", 16)
-    spa_embed_dim = params.get("spa_embed_dim")
+    # spa_embed_dim = output dimension of the spatial encoder (num_filts in TorchSpatial).
+    # NOT hidden_dim, which is the internal FFN width.
+    spa_embed_dim = params.get("spa_embed_dim") or params.get("num_filts")
     if spa_embed_dim is None:
-        spa_embed_dim = params.get("hidden_dim")
-    if spa_embed_dim is None:
-        for key, value in full_state.items():
-            if key.startswith("spa_enc.ffn.layers.") and hasattr(value, "shape") and len(value.shape) >= 1:
-                spa_embed_dim = int(value.shape[0])
-                break
+        # Derive from the last linear layer's output size in the saved weights.
+        last_key = None
+        for key in full_state:
+            if key.startswith("spa_enc.ffn.layers.") and key.endswith(".linear.weight"):
+                last_key = key
+        if last_key is not None:
+            spa_embed_dim = int(full_state[last_key].shape[0])
     if spa_embed_dim is None:
         raise ValueError(
             f"Could not determine spa_embed_dim from checkpoint {checkpoint_path}."
