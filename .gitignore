@@ -1,0 +1,22 @@
+# Data and results (generated at runtime)
+data/
+results/
+figs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# SLURM logs
+slurm_logs/
+*.out
+
+# OS
+.DS_Store
