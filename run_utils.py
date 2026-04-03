@@ -26,7 +26,12 @@ from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from flaml import AutoML
 from geoshapley import GeoShapleyExplainer
 
-from help_utils import calculate_spatial_metrics, get_loc_embeddings, train_loc_encoder
+from help_utils import (
+    calculate_spatial_metrics,
+    get_loc_embeddings,
+    train_loc_encoder,
+    load_pretrained_encoder,
+)
 
 
 ENCODER_CONFIGS = [
@@ -56,6 +61,16 @@ def build_base_parser(description):
     parser.add_argument('--random_seed', type=int, default=222)
     parser.add_argument('--train_encoder', action='store_true', default=False,
                         help='Train encoder before extracting embeddings')
+    parser.add_argument(
+        '--pretrained_weights',
+        type=str,
+        default=None,
+        help=(
+            'Path to a TorchSpatial .pth.tar pretrained encoder checkpoint. '
+            'Loads encoder weights instead of training from scratch. '
+            'Incompatible with --train_encoder.'
+        ),
+    )
     parser.add_argument('--encoder_epochs', type=int, default=500)
     parser.add_argument('--encoder_lr', type=float, default=1e-3)
     parser.add_argument('--embed_dim', type=int, default=4,
@@ -71,6 +86,11 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
                    train_idx, args):
     """Return a 2D numpy embeddings array [N, D]. Falls back to zeros on error."""
     if encoder_type is None:
+        if getattr(args, 'pretrained_weights', None):
+            raise ValueError(
+                '--pretrained_weights was provided but encoder_type is None (baseline). '
+                'Pretrained weights require a non-baseline encoder.'
+            )
         print("  No encoder (baseline)")
         return np.zeros((len(coords), 0))
 
@@ -85,6 +105,11 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
                 device="cpu", n_epochs=args.encoder_epochs, lr=args.encoder_lr,
                 random_seed=args._rep_seed, embed_dim=edim,
             )
+            with torch.no_grad():
+                result = trained_enc(np.expand_dims(coords, axis=1))
+        elif getattr(args, 'pretrained_weights', None):
+            print(f"  Loading pretrained encoder from {args.pretrained_weights}...")
+            trained_enc = load_pretrained_encoder(args.pretrained_weights, device='cpu')
             with torch.no_grad():
                 result = trained_enc(np.expand_dims(coords, axis=1))
         else:
@@ -250,6 +275,9 @@ def run_experiment_loop(args, data_fn, experiment_label, grid_size=None,
     """
     if not (0 <= args.encoder_index < len(ENCODER_CONFIGS)):
         raise ValueError(f"encoder_index must be 0-{len(ENCODER_CONFIGS)-1}")
+
+    if getattr(args, 'pretrained_weights', None) and args.train_encoder:
+        raise ValueError('--pretrained_weights and --train_encoder are mutually exclusive.')
 
     encoder_config = ENCODER_CONFIGS[args.encoder_index]
     encoder_name = encoder_config['name']

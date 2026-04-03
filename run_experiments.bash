@@ -44,16 +44,24 @@ echo "Output: $OUTPUT_DIR"
 echo "Extra: $EXTRA_FLAGS"
 echo "========================================"
 
-# Conda setup
-__conda_setup="$('/u/dkiv2/miniconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
+# Conda setup — find conda from standard locations, no hardcoded home dir
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if command -v conda &>/dev/null; then
+    CONDA_BASE=$(conda info --base 2>/dev/null)
+elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    CONDA_BASE="$HOME/miniconda3"
+elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    CONDA_BASE="$HOME/anaconda3"
+else
+    echo "ERROR: conda not found. Activate your environment manually." >&2
+    exit 1
+fi
+
+__conda_setup="$("${CONDA_BASE}/bin/conda" 'shell.bash' 'hook' 2>/dev/null)"
 if [ $? -eq 0 ]; then
     eval "$__conda_setup"
 else
-    if [ -f "/u/dkiv2/miniconda3/etc/profile.d/conda.sh" ]; then
-        . "/u/dkiv2/miniconda3/etc/profile.d/conda.sh"
-    else
-        export PATH="/u/dkiv2/miniconda3/bin:$PATH"
-    fi
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
 fi
 unset __conda_setup
 
@@ -62,6 +70,7 @@ conda activate e
 mkdir -p "$OUTPUT_DIR" slurm_logs
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+cd "$SCRIPT_DIR"
 python $SCRIPT \
     --encoder_index $ENCODER_IDX \
     --model_type $MODEL_TYPE \

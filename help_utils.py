@@ -144,6 +144,73 @@ def _build_encoder(encoder_type, extent, dim, f_act, device):
     ).to(device)
 
 
+def load_pretrained_encoder(checkpoint_path, device="cpu"):
+    """Load a TorchSpatial pretrained spatial encoder from a .pth.tar checkpoint."""
+    try:
+        # TorchSpatial checkpoints store full training state dicts, not tensors-only archives.
+        net_params = torch.load(
+            checkpoint_path,
+            map_location=torch.device(device),
+            weights_only=False,
+        )
+    except TypeError:
+        # Backward compatibility for older torch versions without weights_only.
+        net_params = torch.load(checkpoint_path, map_location=torch.device(device))
+    params = net_params["params"]
+    full_state = net_params["state_dict"]
+
+    frequency_num = params.get("frequency_num") or params.get("freq", 16)
+    spa_embed_dim = params.get("spa_embed_dim")
+    if spa_embed_dim is None:
+        spa_embed_dim = params.get("hidden_dim")
+    if spa_embed_dim is None:
+        for key, value in full_state.items():
+            if key.startswith("spa_enc.ffn.layers.") and hasattr(value, "shape") and len(value.shape) >= 1:
+                spa_embed_dim = int(value.shape[0])
+                break
+    if spa_embed_dim is None:
+        raise ValueError(
+            f"Could not determine spa_embed_dim from checkpoint {checkpoint_path}."
+        )
+
+    loc_enc = get_spa_encoder(
+        train_locs=[],
+        params=params,
+        spa_enc_type=params["spa_enc_type"],
+        spa_embed_dim=spa_embed_dim,
+        extent=params.get("extent", (-180, 180, -90, 90)),
+        coord_dim=2,
+        frequency_num=frequency_num,
+        max_radius=params.get("max_radius", 1),
+        min_radius=params.get("min_radius", 1e-4),
+        f_act=params.get("spa_f_act", "relu"),
+        freq_init=params.get("freq_init", "geometric"),
+        use_postmat=params.get("spa_enc_use_postmat", True),
+        device=device,
+    ).to(device)
+
+    spa_enc_state = {}
+    for prefix in ("spa_enc.", "module.spa_enc."):
+        spa_enc_state = {
+            k[len(prefix):]: v
+            for k, v in full_state.items()
+            if k.startswith(prefix)
+        }
+        if spa_enc_state:
+            break
+
+    if not spa_enc_state:
+        sample_keys = list(full_state.keys())[:5]
+        raise ValueError(
+            f"No 'spa_enc.*' or 'module.spa_enc.*' keys found in checkpoint "
+            f"{checkpoint_path}. Sample keys: {sample_keys}"
+        )
+
+    loc_enc.load_state_dict(spa_enc_state)
+    loc_enc.eval()
+    return loc_enc
+
+
 def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
                       device="cpu", n_epochs=500, lr=1e-3, random_seed=None,
                       embed_dim=None, f_act="silu"):

@@ -42,10 +42,14 @@ def parse_dir_name(dirname):
         info['feature_config'] = 'emb_only'
     elif 'baseline' in dirname:
         info['feature_config'] = 'baseline'
+    elif 'pretrained' in dirname:
+        info['feature_config'] = 'pretrained'
     else:
         info['feature_config'] = 'emb+coords'
 
-    info['encoder_trained'] = 'trained' in dirname
+    # 'pretrained' dirs are not contrastively trained — only dirs with 'trained'
+    # but not 'pretrained' get encoder_trained=True
+    info['encoder_trained'] = 'trained' in dirname and 'pretrained' not in dirname
 
     dim_match = re.search(r'dim(\d+)', dirname)
     if dim_match:
@@ -69,6 +73,33 @@ def aggregate_single(results_dir):
     if frames:
         return pd.concat(frames, ignore_index=True)
     return None
+
+
+def aggregate(directory_path):
+    """Compatibility wrapper for flat-directory aggregation used in tests."""
+    combined = aggregate_single(directory_path)
+    if combined is None:
+        print("No summary files found")
+        return None
+
+    raw_file = os.path.join(directory_path, "all_encoders_all_repetitions.csv")
+    combined.to_csv(raw_file, index=False)
+
+    group_cols = [c for c in ["encoder", "model", "spatial_effect"] if c in combined.columns]
+    exclude = set(group_cols + ["repetition"])
+    metric_cols = [
+        c for c in combined.columns
+        if c not in exclude and combined[c].dtype in ("float64", "float32", "int64")
+    ]
+    stats = combined.groupby(group_cols)[metric_cols].agg(["mean", "std"]).round(4)
+    stats.columns = ["_".join(col) for col in stats.columns]
+    stats.reset_index(inplace=True)
+    stats_file = os.path.join(directory_path, "all_encoders_summary_stats.csv")
+    stats.to_csv(stats_file, index=False)
+
+    print(f"Saved: {raw_file}")
+    print(f"Saved: {stats_file}")
+    return combined
 
 
 def run_statistical_tests(combined, output_dir):
