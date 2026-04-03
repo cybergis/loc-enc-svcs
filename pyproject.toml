@@ -19,7 +19,7 @@ dependencies = [
     "libpysal>=4.6",
     "esda>=2.4",
     "flaml>=1.0",
-    "geoshapley>=0.1",
+    "geoshapley @ git+https://github.com/ziqi-li/geoshapley.git",
 ]
 
 [project.optional-dependencies]
