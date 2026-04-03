@@ -6,7 +6,6 @@ for comparing true vs. estimated spatially-varying coefficients.
 """
 
 import os
-import sys
 
 import torch
 import numpy as np
@@ -17,16 +16,7 @@ from sklearn.linear_model import LinearRegression
 from libpysal import weights
 from esda.moran import Moran
 
-# Add TorchSpatial/main to path so its modules are importable
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_TS_DIR = os.path.join(_HERE, "TorchSpatial", "main")
-if _TS_DIR not in sys.path:
-    sys.path.insert(0, _TS_DIR)
-
-from SpatialRelationEncoder import *  # noqa: E402
-from module import *  # noqa: E402
-from data_utils import *  # noqa: E402
-from utils import *  # noqa: E402
+from torchspatial import *
 
 SPA_EMBED_DIM = 4  # Default embedding dimension; overridable via get_loc_embeddings/train_loc_encoder
 
@@ -158,21 +148,24 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
                       device="cpu", n_epochs=500, lr=1e-3, random_seed=None,
                       embed_dim=None, f_act="silu"):
     """
-    Train a location encoder to predict y from coordinates alone.
+    Train a location encoder using spatial contrastive learning.
 
-    Following TorchSpatial's approach: encoder produces embeddings, a linear
-    head maps embeddings to y, trained with MSE loss. This mirrors how
-    TorchSpatial trains encoders to predict image features (l2regress),
-    but using the response variable as the target signal.
+    The encoder learns to produce embeddings whose cosine similarity reflects
+    spatial proximity on the sphere (great-circle distance). This preserves
+    the full multi-dimensional spatial structure in the embedding space,
+    unlike MSE y-prediction which collapses embeddings to 1D.
+
+    Inspired by SatCLIP and Sphere2Vec's contrastive modes, but using
+    coordinate proximity as the supervision signal instead of image features.
 
     Args:
-        coords:       np.ndarray [N, 2], (lon, lat) or (x, y) — TRAIN SET ONLY
-        X1, X2:      np.ndarray [N], covariates — not used
-        y:            np.ndarray [N], response — TRAIN SET ONLY
+        coords:       np.ndarray [N, 2], (lon, lat) — TRAIN SET ONLY
+        X1, X2:       np.ndarray [N], covariates — not used (kept for API compat)
+        y:            np.ndarray [N], response — not used (kept for API compat)
         encoder_type: TorchSpatial encoder string
         extent:       (xmin, xmax, ymin, ymax)
         device:       'cpu' or 'cuda:0'
-        n_epochs:     gradient steps (default 500)
+        n_epochs:     training epochs (default 500)
         lr:           initial Adam learning rate (default 1e-3)
         random_seed:  torch manual seed for reproducibility
         embed_dim:    embedding dimension. Defaults to SPA_EMBED_DIM.
@@ -182,6 +175,7 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
     """
     import torch.nn as nn
     import torch.optim as optim
+    import torch.nn.functional as F
 
     dim = embed_dim if embed_dim is not None else SPA_EMBED_DIM
 
@@ -190,27 +184,66 @@ def train_loc_encoder(coords, X1, X2, y, encoder_type, extent,
 
     loc_enc = _build_encoder(encoder_type, extent, dim, f_act, device)
 
-    # Single linear head: embed_dim → 1 (no bias), matching TorchSpatial's FCNet
-    head = nn.Linear(dim, 1, bias=False).to(device)
-    nn.init.xavier_uniform_(head.weight)
+    optimizer = optim.Adam(loc_enc.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.995)
 
-    optimizer = optim.Adam(
-        list(loc_enc.parameters()) + list(head.parameters()), lr=lr
-    )
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
+    coords_np = np.array(coords)
+    n = len(coords_np)
+    batch_size = min(512, n)
+    sigma = 0.25  # Gaussian kernel bandwidth (25% of data extent)
 
-    y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
-    coords_enc = np.expand_dims(np.array(coords), axis=1)  # [N, 1, 2]
+    # Use Haversine for global scale, Euclidean for regional
+    lon_span = extent[1] - extent[0]
+    lat_span = extent[3] - extent[2]
+    use_haversine = (lon_span > 300 and lat_span > 150)
+    if use_haversine:
+        coords_rad = np.deg2rad(coords_np)
 
     loc_enc.train()
-    for _ in range(n_epochs):
-        optimizer.zero_grad()
+    for epoch in range(n_epochs):
+        # Sample a random mini-batch
+        idx = np.random.choice(n, batch_size, replace=False)
+        batch_coords = coords_np[idx]
+
+        if use_haversine:
+            # Pairwise great-circle distances via Haversine [B, B]
+            batch_rad = coords_rad[idx]
+            lon1 = batch_rad[:, 0:1]   # [B, 1]
+            lat1 = batch_rad[:, 1:2]
+            lon2 = batch_rad[:, 0:1].T  # [1, B]
+            lat2 = batch_rad[:, 1:2].T
+            dlat = lat1 - lat2
+            dlon = lon1 - lon2
+            a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+            dist = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+        else:
+            # Euclidean distance on raw coordinates (valid for regional scales)
+            dx = batch_coords[:, 0:1] - batch_coords[:, 0:1].T
+            dy = batch_coords[:, 1:2] - batch_coords[:, 1:2].T
+            dist = np.sqrt(dx ** 2 + dy ** 2)
+
+        # Normalize to [0, 1] by max pairwise distance in batch
+        max_dist = dist.max()
+        dist_norm = dist / max_dist if max_dist > 0 else dist
+
+        # Target similarity: Gaussian kernel on normalized distance
+        target_sim = np.exp(-dist_norm ** 2 / (2 * sigma ** 2))
+        target_sim = torch.tensor(target_sim, dtype=torch.float32).to(device)
+
+        # Forward pass
+        coords_enc = np.expand_dims(batch_coords, axis=1)  # [B, 1, 2]
         emb = loc_enc(coords_enc)
         emb = torch.squeeze(emb)
         if emb.ndim == 1:
             emb = emb.unsqueeze(0)
-        y_pred = head(emb)
-        loss = torch.nn.functional.mse_loss(y_pred, y_t)
+
+        # Cosine similarity matrix
+        emb_norm = F.normalize(emb, dim=-1)
+        pred_sim = emb_norm @ emb_norm.T  # [B, B]
+
+        # Soft contrastive loss: embedding similarity should match spatial proximity
+        optimizer.zero_grad()
+        loss = F.mse_loss(pred_sim, target_sim)
         loss.backward()
         optimizer.step()
         scheduler.step()

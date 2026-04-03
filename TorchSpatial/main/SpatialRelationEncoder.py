@@ -6,8 +6,8 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-from module import *
-from data_utils import *
+from .module import *
+from .data_utils import *
 
 # from spherical_harmonics_ylm_numpy import get_positional_encoding
 

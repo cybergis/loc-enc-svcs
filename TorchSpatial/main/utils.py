@@ -8,11 +8,11 @@ import logging
 import decimal
 from torch.utils.data.sampler import Sampler
 
-from SpatialRelationEncoder import *
-from module import *
-import models
+from .SpatialRelationEncoder import *
+from .module import *
+from . import models
 
-import data_utils as dtul
+from . import data_utils as dtul
 
 
 def make_model_dataset_tag(dataset, meta_type):
