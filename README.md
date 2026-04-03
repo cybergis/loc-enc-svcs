@@ -12,22 +12,28 @@ This project answers that by:
 3. Using GeoShapley to extract estimated spatial effects
 4. Comparing recovered effects against ground truth across 11 encoders
 
+Three encoder conditions are compared:
+- **Untrained** — random-initialized encoder weights
+- **Contrastively trained** — spatial contrastive loss (cosine similarity matched to Gaussian kernel of great-circle distance)
+- **Pretrained** — TorchSpatial task-supervised weights (iNat species classification)
+
 ## Supported Encoders
 
 All encoders are from [TorchSpatial](https://github.com/seai-lab/TorchSpatial) (Wu et al., NeurIPS 2024):
 
-| Encoder | Type |
-|---------|------|
-| Space2Vec-theory | Fourier features (theory-grounded) |
-| Space2Vec-grid | Multi-scale grid cells |
-| tile_ffn | Tile + feedforward |
-| wrap_ffn | Wrap + feedforward |
-| rff | Random Fourier features |
-| NeRF | Neural radiance field positional encoding |
-| Sphere2Vec-sphereC/C+ | Spherical (Cartesian) |
-| Sphere2Vec-sphereM/M+ | Spherical (Mercator) |
-| Sphere2Vec-dfs | Spherical (DFS) |
-| none | Baseline (no spatial encoding) |
+| Encoder | Type | Tier |
+|---------|------|------|
+| Sphere2Vec-dfs | Spherical (DFS) | 1 — works untrained |
+| Sphere2Vec-sphereM+ | Spherical (Mercator+) | 1 — works untrained |
+| wrap_ffn | Wrap + feedforward | 1 — works untrained |
+| Sphere2Vec-sphereM | Spherical (Mercator) | 2 — benefits from training |
+| Sphere2Vec-sphereC/C+ | Spherical (Cartesian) | 2 — benefits from training |
+| Space2Vec-theory | Fourier features (theory-grounded) | 2 — benefits from training |
+| Space2Vec-grid | Multi-scale grid cells | 2 — benefits from training |
+| NeRF | Neural radiance field positional encoding | 2 — limited training gain |
+| rff | Random Fourier features | 3 — architecturally limited |
+| tile_ffn | Tile + feedforward | 3 — architecturally limited |
+| none | Baseline (no spatial encoding) | — |
 
 ## Setup
 
@@ -37,7 +43,7 @@ cd ExplainEmbeddingSpatialEffects
 pip install -e .
 ```
 
-This installs all dependencies including [TorchSpatial](https://github.com/danielkiv/TorchSpatial) (MIT licensed), which is pulled automatically from GitHub.
+This installs all dependencies including [TorchSpatial](https://github.com/danielkiv/TorchSpatial) (pulled automatically from GitHub) and `mgwr` for GWR-smoothed SVC estimation.
 
 For development (includes pytest):
 
@@ -51,50 +57,77 @@ pip install -e ".[dev]"
 
 ```bash
 # Grid experiment (25x25 synthetic grid)
-python gridRun.py --encoder_index 0 --model_type MLP --num_repetitions 1
+python gridRun.py --encoder_index 0 --model_type MLP --num_repetitions 1 --output_dir ./results/test
 
 # County experiment (US counties with synthetic DGP)
-python countiesRun.py --encoder_index 0 --model_type MLP --num_repetitions 1
+python countiesRun.py --encoder_index 0 --model_type MLP --num_repetitions 1 --output_dir ./results/test
+
+# Global experiment (spherical DGP — main benchmark scale)
+python globalRun.py --encoder_index 0 --model_type MLP --num_repetitions 1 --output_dir ./results/test
 ```
 
-### Full experiment (all encoders, 25 reps)
+### Full experiment via SLURM
 
 ```bash
-# Run encoder index 0-11 (see ENCODER_CONFIGS in gridRun.py)
-for i in $(seq 0 11); do
-    python gridRun.py --encoder_index $i --model_type MLP --num_repetitions 25 --output_dir ./results/grid
-done
-```
+# All 12 encoders, 25 reps — untrained condition
+sbatch --job-name=global run_experiments.bash global ./results/global_simple_dim8 MLP 25
 
-Or with SLURM:
-```bash
-sbatch run_all_grid.bash ./results/grid MLP 25
+# Contrastively trained condition
+sbatch --job-name=global_trained run_experiments.bash global ./results/global_simple_trained_dim8 MLP 25 "--train_encoder --encoder_epochs 500"
+
+# Emb-only variant (no raw coordinates passed to model)
+sbatch --job-name=global_embonly run_experiments.bash global ./results/global_simple_embonly_dim8 MLP 25 "--no_coords"
+
+# TorchSpatial pretrained weights (encoders 0,9,10 have clean inat_2018 checkpoints)
+sbatch --job-name=global_pretrained --array=0,9,10 run_pretrained.bash global ./results/global_simple_pretrained_dim8 MLP 5
 ```
 
 ### Aggregate and visualize
 
 ```bash
-# Combine per-encoder summaries
+# Combine per-encoder summaries across result directories
 python aggregate_metrics.py
 
-# Create figures
-python visualize_grid_aggregated.py --results_dir ./results/grid --model_type MLP
-python visualize_counties.py --results_dir ./results/counties --model_type MLP
+# Figures
+python visualize_paper.py
+python visualize_grid_aggregated.py --results_dir ./results/global_simple_dim8 --model_type MLP
+python visualize_counties.py --results_dir ./results/county_simple_dim8 --model_type MLP
 ```
 
 ## Project Structure
 
 ```
-gridRun.py              # Grid experiment runner
-countiesRun.py          # US county experiment runner
-dgp_utils.py            # Synthetic data generation (MGWR-style DGP)
-help_utils.py           # Location encoder wrapper + spatial metrics
-aggregate_metrics.py    # Combine results across encoders
-visualize_grid_aggregated.py   # Grid result visualizations
-visualize_counties.py          # County choropleth visualizations
-TorchSpatial/           # (removed; installed as pip package from danielkiv/TorchSpatial)
-tests/                  # Unit tests
+gridRun.py                   # Grid experiment runner (25×25 regional grid)
+countiesRun.py               # US county experiment runner
+globalRun.py                 # Global experiment runner (spherical DGP)
+run_utils.py                 # Shared CLI args, encoder loading, experiment loop
+dgp_utils.py                 # Synthetic data generation (MGWR-style DGP)
+help_utils.py                # Location encoder wrapper, contrastive training,
+                             #   pretrained weight loader, spatial metrics
+aggregate_metrics.py         # Combine results across encoders and directories
+run_experiments.bash         # SLURM array script for untrained/trained/emb-only
+run_pretrained.bash          # SLURM array script for TorchSpatial pretrained weights
+visualize_paper.py           # Publication figures
+visualize_grid_aggregated.py # Grid result heatmaps
+visualize_counties.py        # County choropleth visualizations
+tests/                       # Unit tests (pytest)
 ```
+
+## Key CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--encoder_index` | required | 0–11, selects encoder from ENCODER_CONFIGS |
+| `--model_type` | `MLP` | `MLP` or `XGBoost` |
+| `--num_repetitions` | 25 | Number of random seeds |
+| `--train_encoder` | off | Enable spatial contrastive training |
+| `--pretrained_weights` | None | Path to TorchSpatial `.pth.tar` checkpoint |
+| `--no_coords` | off | Exclude raw lon/lat (emb-only condition) |
+| `--embed_dim` | 4 | Embedding dimension fed to ML model |
+| `--encoder_epochs` | 500 | Contrastive training epochs |
+| `--noise_std` | 0.1 | DGP noise level |
+
+`--train_encoder` and `--pretrained_weights` are mutually exclusive.
 
 ## Key Metrics
 

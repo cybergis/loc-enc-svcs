@@ -60,12 +60,8 @@ ENCODER_NAMES=(
     "Space2Vec-grid"      # 10
 )
 
-# Resolve pretrained models dir relative to this script's repo root.
-# Assumes TorchSpatial lives alongside this project:
-#   <shared_dir>/effectsExplainableEmbeddings/  ← this repo
-#   <shared_dir>/TorchSpatial/                  ← TorchSpatial repo
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PT_DIR="${SCRIPT_DIR}/../TorchSpatial/pre_trained_models"
+PT_DIR="/u/dkiv2/group_dkiv2/active/TorchSpatial/pre_trained_models"
+SCRIPT_DIR="/u/dkiv2/group_dkiv2/active/effectsExplainableEmbeddings"
 
 CHECKPOINTS=(
     "${PT_DIR}/space2vec_theory/model_inat_2018_Space2Vec-theory_0.0200_64_0.0500000_360.000_1_512_BATCH4096_leakyrelu.pth.tar"                     # 0 inat_2018
