@@ -96,6 +96,10 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
 
     try:
         edim = getattr(args, 'embed_dim', 4)
+        # Writable copy: some encoders (e.g. wrap_ffn) mutate their input array
+        # in-place, which raises "output array is read-only" on read-only views
+        # (e.g. a pandas .values array fed to the trained/pretrained forward).
+        coords = np.array(coords)
         if args.train_encoder:
             print(f"  Training encoder on {len(train_idx)} points "
                   f"({args.encoder_epochs} epochs, lr={args.encoder_lr}, dim={edim})...")
@@ -134,10 +138,17 @@ def get_embeddings(encoder_name, encoder_type, coords, X1, X2, y,
         return embeddings
 
     except Exception as e:
-        print(f"  Error generating embeddings: {e}")
+        # Do NOT silently fall back to a no-embedding baseline: that makes a
+        # broken encoder masquerade as the raw-coords baseline, producing
+        # identical (and invalid) results across every encoder. Fail loudly so
+        # the condition is rerun, not quietly contaminated.
+        print(f"  FATAL: embedding generation failed for '{encoder_type}': {e}")
         traceback.print_exc()
-        print("  Falling back to baseline (no embeddings).")
-        return np.zeros((len(coords), 0))
+        raise RuntimeError(
+            f"Embedding generation failed for encoder '{encoder_type}'. "
+            f"Refusing to fall back to no-embeddings (would silently corrupt "
+            f"results). Original error: {e}"
+        ) from e
 
 
 def prepare_features(X1, X2, coords, embeddings, extent, no_coords=False):

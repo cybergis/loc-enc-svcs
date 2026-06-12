@@ -18,6 +18,37 @@ from esda.moran import Moran
 
 from torchspatial import *
 
+
+def _patch_silu_activation():
+    """Teach TorchSpatial's activation lookup about 'silu'/'swish' (nn.SiLU).
+
+    The installed torchspatial only recognizes {leakyrelu, relu, sigmoid, tanh,
+    gelu} and raises on 'silu', causing every encoder to fall back to no
+    embeddings. Our experiments use Swish/SiLU (matching the original runs), so
+    we extend get_activation_function at runtime. Patched in both module and
+    SpatialRelationEncoder namespaces because the latter does `from .module
+    import *`, binding its own reference at import time.
+    """
+    import torch.nn as nn
+    import torchspatial.module as _tsm
+    import torchspatial.SpatialRelationEncoder as _tse
+
+    _orig = _tsm.get_activation_function
+
+    def _patched(activation, context_str):
+        if activation in ("silu", "swish"):
+            return nn.SiLU()
+        return _orig(activation, context_str)
+
+    _patched._silu_patched = True
+    if not getattr(_tsm.get_activation_function, "_silu_patched", False):
+        _tsm.get_activation_function = _patched
+    if not getattr(_tse.get_activation_function, "_silu_patched", False):
+        _tse.get_activation_function = _patched
+
+
+_patch_silu_activation()
+
 SPA_EMBED_DIM = 4  # Default embedding dimension; overridable via get_loc_embeddings/train_loc_encoder
 
 # Encoders that normalize coordinates internally or convert to 3D — max_radius=1 is correct
