@@ -275,7 +275,7 @@ class GlobalDGP:
         - Poles are handled naturally
         - An MLP with raw lon/lat cannot easily learn these patterns
           because of the coordinate discontinuity, while location encoders
-          that project to 3D (Sphere2Vec, NeRF) handle this natively.
+          that project to 3D usually handle this natively.
         """
         # Convert to radians and project to unit sphere
         lon_rad = np.deg2rad(lons)
