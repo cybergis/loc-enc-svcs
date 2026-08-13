@@ -21,3 +21,11 @@ slurm_logs/
 
 # OS
 .DS_Store
+
+# Generated figures written to the repo root
+/*.pdf
+/*.png
+
+# Scratch notebooks with large embedded outputs
+dumb.ipynb
+shap_test.ipynb
