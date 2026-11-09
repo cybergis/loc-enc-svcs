@@ -32,8 +32,10 @@ All encoders are from [TorchSpatial](https://github.com/seai-lab/TorchSpatial) (
 | Space2Vec-grid | Multi-scale grid cells | 2 — benefits from training |
 | NeRF | Neural radiance field positional encoding | 2 — limited training gain |
 | rff | Random Fourier features | 3 — architecturally limited |
-| tile_ffn | Tile + feedforward | 3 — architecturally limited |
+| tile_ffn | Tile + feedforward | see note below |
 | none | Baseline (no spatial encoding) | — |
+
+**Note on `tile_ffn` (November 2026).** Earlier versions produced a constant `tile_ffn` embedding: TorchSpatial's `GridLookupSpatialRelationLocationEncoder` did not pass the tile `interval` to its lookup table, so every location fell in one tile. This is fixed in [danielkiv/TorchSpatial@ab49291](https://github.com/danielkiv/TorchSpatial/commit/ab49291) (pinned in `pyproject.toml`), and `tile_ffn` now uses a tile side of 1/20 of the longer side of the study extent. The `tile_ffn` results in the SIGSPATIAL '26 proceedings version predate this fix.
 
 ## Setup
 

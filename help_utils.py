@@ -55,6 +55,17 @@ SPA_EMBED_DIM = 4  # Default embedding dimension; overridable via get_loc_embedd
 _EXTENT_NORMALIZED_ENCODERS = {'tile_ffn', 'wrap_ffn', 'rff', 'NeRF'}
 
 
+# tile_ffn's min_radius is its tile side. 1e-4 would ask for ~1e13 tiles, so tile_ffn
+# uses 1/TILE_FRACTION of the longer extent side instead (20 tiles along it).
+TILE_FRACTION = 20
+
+
+def _get_min_radius(encoder_type, extent):
+    if encoder_type == 'tile_ffn':
+        return float(max(extent[1] - extent[0], extent[3] - extent[2])) / TILE_FRACTION
+    return 0.0001
+
+
 def _get_max_radius(encoder_type, extent):
     """Encoders using raw coordinates need max_radius matching the data span."""
     if encoder_type in _EXTENT_NORMALIZED_ENCODERS or encoder_type is None:
@@ -97,7 +108,7 @@ def get_loc_embeddings(coords, encoder_type, extent=None, device="cpu",
         "extent": extent,
         "freq": 16,
         "max_radius": _get_max_radius(encoder_type, extent),
-        "min_radius": 0.0001,
+        "min_radius": _get_min_radius(encoder_type, extent),
         "spa_f_act": f_act,
         "freq_init": "geometric",
         "num_hidden_layer": 1,
@@ -146,7 +157,7 @@ def _build_encoder(encoder_type, extent, dim, f_act, device):
         "extent": extent,
         "freq": 16,
         "max_radius": _get_max_radius(encoder_type, extent),
-        "min_radius": 0.0001,
+        "min_radius": _get_min_radius(encoder_type, extent),
         "spa_f_act": f_act,
         "freq_init": "geometric",
         "num_hidden_layer": 1,

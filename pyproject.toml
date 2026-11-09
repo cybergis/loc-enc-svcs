@@ -7,7 +7,7 @@ name = "effects-explainable-embeddings"
 version = "0.1.0"
 requires-python = ">=3.8"
 dependencies = [
-    "torchspatial @ git+https://github.com/danielkiv/TorchSpatial.git",
+    "torchspatial @ git+https://github.com/danielkiv/TorchSpatial.git@ab49291",
     "numpy>=1.21",
     "pandas>=1.3",
     "scipy>=1.7",
